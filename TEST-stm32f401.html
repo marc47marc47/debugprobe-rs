@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>測試紀錄：STM32F401 Black Pill 作為 layer 2</title>
+<style>
+  body { font-family: "Segoe UI", "Microsoft JhengHei", system-ui, sans-serif;
+         max-width: 980px; margin: 24px auto; padding: 0 16px; color: #1c1e21; line-height: 1.6; }
+  h1 { border-bottom: 3px solid #2a7; padding-bottom: 6px; }
+  h2 { margin-top: 32px; border-left: 5px solid #2a7; padding-left: 10px; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+  th, td { border: 1px solid #ccd; padding: 6px 10px; text-align: left; font-size: 14px; }
+  th { background: #eef6f1; }
+  code { background: #f3f4f6; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #1e1e1e; color: #d4d4d4; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 13px; }
+  .ok { color: #2a7; font-weight: bold; }
+  .pill { display:inline-block; background:#2a7; color:#fff; border-radius:12px; padding:1px 10px; font-size:13px; }
+  figcaption { color:#667; font-size:13px; margin-top:4px; }
+  .legend span { display:inline-block; margin-right:16px; font-size:13px; }
+  .sw { color:#c33; } .ua { color:#27a; } .i2 { color:#a6a; } .pw { color:#777; }
+</style>
+</head>
+<body>
+
+<h1>測試紀錄：STM32F401 Black Pill 作為 layer 2 目標</h1>
+<p><b>日期</b>：2026-06-16　|　<b>結果</b>：<span class="pill">✅ 全部通過</span></p>
+<p>驗證 debugprobe-rs 探針（通用 CMSIS-DAP SWD）能把非 RP2040 晶片（WeAct STM32F401 "Black Pill"）
+當作 layer 2 目標：SWD 燒錄/重置 + USB-to-UART 橋接，並跑 LED 閃爍 + OLED 狀態 + UART 雙向 rx/tx。
+純文字版見 <a href="TEST-stm32f401.md">TEST-stm32f401.md</a>。</p>
+
+<h2>接線圖</h2>
+<figure>
+<svg viewBox="0 0 920 470" xmlns="http://www.w3.org/2000/svg" font-family="Consolas, monospace" font-size="13">
+  <defs>
+    <marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#333"/>
+    </marker>
+  </defs>
+
+  <!-- 主機 -->
+  <rect x="360" y="14" width="200" height="40" rx="6" fill="#eef" stroke="#557"/>
+  <text x="460" y="39" text-anchor="middle" font-weight="bold">主機 PC</text>
+  <line x1="460" y1="54" x2="150" y2="92" stroke="#777" stroke-width="2"/>
+  <text x="250" y="66" fill="#777">USB：CMSIS-DAP v2 + CDC-ACM</text>
+
+  <!-- Probe A -->
+  <rect x="30" y="92" width="240" height="232" rx="8" fill="#f6fbf8" stroke="#2a7" stroke-width="2"/>
+  <text x="150" y="116" text-anchor="middle" font-weight="bold">Probe A（Pico）</text>
+  <text x="150" y="134" text-anchor="middle" fill="#557">debugprobe-rs · board-pico</text>
+  <text x="150" y="150" text-anchor="middle" fill="#889">E6605838834DA330</text>
+
+  <text x="48" y="182" class="sw">GP2  SWCLK</text>
+  <text x="48" y="206" class="sw">GP3  SWDIO</text>
+  <text x="48" y="230" class="sw">GP1  nRESET</text>
+  <text x="48" y="258" class="ua">GP4  UART1 TX</text>
+  <text x="48" y="282" class="ua">GP5  UART1 RX</text>
+  <text x="48" y="310" class="pw">GND</text>
+
+  <!-- Black Pill -->
+  <rect x="640" y="92" width="250" height="300" rx="8" fill="#fbf7fb" stroke="#a6a" stroke-width="2"/>
+  <text x="765" y="116" text-anchor="middle" font-weight="bold">STM32F401 Black Pill</text>
+  <text x="765" y="134" text-anchor="middle" fill="#557">WeAct · USB-C 自身供電</text>
+  <text x="765" y="150" text-anchor="middle" fill="#889">id 0x433 → 401xE / 512KB</text>
+
+  <text x="770" y="182" class="sw">PA14 SWCLK</text>
+  <text x="770" y="206" class="sw">PA13 SWDIO</text>
+  <text x="770" y="230" class="sw">NRST</text>
+  <text x="770" y="258" class="ua">PA10 USART1 RX</text>
+  <text x="770" y="282" class="ua">PA9  USART1 TX</text>
+  <text x="770" y="310" class="pw">GND</text>
+  <text x="770" y="338" class="i2">PB8/PB9 I2C1</text>
+  <text x="770" y="362" fill="#c63">PC13 LED（板載）</text>
+
+  <!-- 連線 SWD -->
+  <line x1="170" y1="178" x2="765" y2="178" stroke="#c33" stroke-width="2" marker-end="url(#ar)"/>
+  <line x1="170" y1="202" x2="765" y2="202" stroke="#c33" stroke-width="2" marker-end="url(#ar)"/>
+  <line x1="765" y1="202" x2="172" y2="202" stroke="#c33" stroke-width="2" marker-end="url(#ar)"/>
+  <line x1="175" y1="226" x2="765" y2="226" stroke="#c33" stroke-width="2" marker-end="url(#ar)"/>
+  <!-- UART -->
+  <line x1="185" y1="254" x2="765" y2="254" stroke="#27a" stroke-width="2" marker-end="url(#ar)"/>
+  <line x1="765" y1="278" x2="187" y2="278" stroke="#27a" stroke-width="2" marker-end="url(#ar)"/>
+  <!-- GND -->
+  <line x1="120" y1="306" x2="765" y2="306" stroke="#999" stroke-width="2" stroke-dasharray="4 3"/>
+
+  <!-- OLED -->
+  <rect x="30" y="356" width="240" height="86" rx="8" fill="#fdf7fd" stroke="#a6a"/>
+  <text x="150" y="378" text-anchor="middle" font-weight="bold">SSD1306 OLED 0.96"</text>
+  <text x="48" y="402" class="i2">SCL / SDA</text>
+  <text x="48" y="424" class="pw">VCC 3V3 / GND</text>
+  <line x1="180" y1="398" x2="770" y2="332" stroke="#a6a" stroke-width="2" marker-end="url(#ar)"/>
+
+  <!-- legend -->
+  <rect x="300" y="408" width="320" height="54" rx="6" fill="#fafafa" stroke="#ddd"/>
+  <text x="314" y="428"><tspan class="sw">━ SWD</tspan>　<tspan class="ua">━ UART</tspan>　<tspan class="i2">━ I2C</tspan>　<tspan class="pw">┄ GND</tspan></text>
+  <text x="314" y="450" fill="#667">箭頭＝訊號方向；雙箭頭＝雙向（SWDIO / UART）</text>
+</svg>
+<figcaption>探針 A 透過 SWD（含 nRESET）燒錄/偵錯 F401，並以 UART 雙向橋接；OLED 由 F401 的 I2C1 驅動。</figcaption>
+</figure>
+
+<h2>結果一覽</h2>
+<table>
+  <tr><th>驗證項</th><th>結果</th></tr>
+  <tr><td>SWD 連線（讀 ROM table / Cortex-M4）</td><td class="ok">✅</td></tr>
+  <tr><td>清除 RDP Level 1（<code>stm32f2x unlock</code>，mass erase）</td><td class="ok">✅</td></tr>
+  <tr><td><b>SWD 燒錄韌體</b>（<code>probe-rs download</code>）</td><td class="ok">✅ 1.71s</td></tr>
+  <tr><td>SWD reset</td><td class="ok">✅</td></tr>
+  <tr><td>韌體運行（LED PC13 閃爍、計數遞增）</td><td class="ok">✅</td></tr>
+  <tr><td>OLED 狀態（<code>f401 layer2</code> / <code>tx{n} rx{n}</code>）</td><td class="ok">✅</td></tr>
+  <tr><td>UART TX（F401→主機）<code>hello from f401 #n</code></td><td class="ok">✅</td></tr>
+  <tr><td>UART RX（主機→F401 echo）</td><td class="ok">✅</td></tr>
+</table>
+
+<h2>解 RDP + 燒錄關鍵指令</h2>
+<pre>// 1. 清 RDP（connect-under-reset；RDP 1→0 觸發 mass erase）→ 印 "stm32f2x unlocked." 後拔插 USB-C
+openocd -f interface/cmsis-dap.cfg -c "transport select swd" -c "adapter speed 1000" \
+  -f target/stm32f4x.cfg -c "reset_config srst_only srst_nogate connect_assert_srst" \
+  -c "init" -c "catch { reset halt }" -c "catch { halt }" -c "stm32f2x unlock 0" \
+  -c "reset run" -c "shutdown"
+
+// 2. 燒錄 + 重置
+cd stm32f401-target &amp;&amp; cargo build --release
+probe-rs download --chip STM32F401CCUx --probe 2e8a:000c-0:E6605838834DA330 --protocol swd --speed 1000 \
+  target/thumbv7em-none-eabihf/release/stm32f401-target
+probe-rs reset --chip STM32F401CCUx --probe 2e8a:000c-0:E6605838834DA330 --protocol swd</pre>
+
+<h2>關鍵教訓</h2>
+<ol>
+  <li><b>供電</b>：寄生供電（~2V）會「DP 讀得到、AHB 全失敗」，務必目標自身供電。</li>
+  <li><b>RDP Level 1</b>：出廠讀保護擋 flash/SRAM debug → 先 <code>stm32f2x unlock 0</code>（mass erase）再上電。</li>
+  <li><b>connect-under-reset</b>：出廠韌體 sleep + RDP → 初次連線/解保護都要在 reset 下做。</li>
+  <li><b>SWD 長線訊號完整性</b>：DP 永遠 OK、AP/AHB 時好時壞報 <code>Protocol error</code>；<b>降頻無效</b>。
+      解法：短線就近接地 + 探針 SWCLK/SWDIO 改 2mA 弱驅動 + 慢 slew + 輸入 Schmitt（<code>src/probe/mod.rs</code>）。</li>
+  <li>驗 UART 單次開埠即可；快速開關 CDC COM 掃 baud 會讓探針 USB 瞬斷（會自行重列舉）。</li>
+</ol>
+
+<p style="color:#778;font-size:13px;margin-top:28px">細節見 <a href="MULTI-TARGET.md">MULTI-TARGET.md</a> · <a href="TEST-stm32f401.md">TEST-stm32f401.md</a></p>
+
+</body>
+</html>

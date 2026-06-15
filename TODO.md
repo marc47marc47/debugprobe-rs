@@ -231,6 +231,23 @@
 
 ---
 
+## Phase 11 — layer 2 多晶片支援（探針驗證跨廠牌目標）
+
+探針本身是通用 CMSIS-DAP SWD 探針、與目標晶片無關，故**不改探針韌體**；本階段驗證探針能把
+**非 RP2040** 的晶片當作 layer 2 目標，並提供對等的目標測試韌體（OLED + LED + UART rx/tx）。
+詳見 [`MULTI-TARGET.md`](MULTI-TARGET.md)。
+
+- [x] **WeAct Black Pill（STM32F401CCU6；矽晶實為 401xE/512KB, Cortex-M4F）**：新增獨立 crate
+      `stm32f401-target/`（embassy-stm32 0.6，target `thumbv7em-none-eabihf`，與根套件解耦）
+- [x] 目標韌體 `stm32f401-target/src/main.rs`：板載 LED(PC13) 閃爍 + OLED(I2C1 PB8/PB9) 狀態
+      + USART1(PA9/PA10) BufferedUart 週期 TX 心跳 + RX echo（鏡像 RP2040 的 uartmon/uarthello）
+- [x] `cargo build --release` 編譯通過（critical-section 由 `cortex-m/critical-section-single-core` 提供）
+- [x] 探針 SWD 長線訊號完整性：`src/probe/mod.rs` 把 SWCLK/SWDIO 改 2mA 弱驅動 + 慢 slew + 輸入 Schmitt
+- [x] **實機驗證 ✅（2026-06-16）**：清除出廠 RDP Level 1（OpenOCD `stm32f2x unlock`，mass erase）後，
+      探針 A 經 `probe-rs download`/`reset` 燒錄成功、LED(PC13) 閃、UART **雙向**皆通。詳見 `MULTI-TARGET.md`
+
+---
+
 ## 關鍵檔案（將新增 / 修改）
 
 - `Cargo.toml`（根目錄）— 改為 embedded no_std，加入 embassy 依賴與 features

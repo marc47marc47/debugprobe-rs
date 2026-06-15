@@ -20,7 +20,7 @@
 
 use embassy_rp::Peri;
 use embassy_rp::clocks::clk_sys_freq;
-use embassy_rp::gpio::{Flex, Level, Pull};
+use embassy_rp::gpio::{Drive, Flex, Level, Pull, SlewRate};
 use embassy_rp::peripherals::PIO0;
 use embassy_rp::pio::{
     Common, Config, Direction, LoadedProgram, Pin, ShiftConfig, ShiftDirection, StateMachine,
@@ -65,9 +65,9 @@ impl<'d> Probe<'d> {
     pub fn new(
         mut common: Common<'d, PIO0>,
         mut sm: StateMachine<'d, PIO0, 0>,
-        swclk: Pin<'d, PIO0>,
+        mut swclk: Pin<'d, PIO0>,
         mut swdio: Pin<'d, PIO0>,
-        swdi: Option<Pin<'d, PIO0>>,
+        mut swdi: Option<Pin<'d, PIO0>>,
         reset_pin: Option<Peri<'d, embassy_rp::peripherals::PIN_1>>,
     ) -> Self {
         // --- 組譯 PIO 程式（get_next_cmd 置於 origin）---
@@ -97,6 +97,18 @@ impl<'d> Probe<'d> {
 
         // SWDIO 需有 pull-up，idle 為高。
         swdio.set_pull(Pull::Up);
+
+        // 長線杜邦訊號完整性：SWCLK/SWDIO 改弱驅動(2mA)+慢 slew，軟化邊緣、
+        // 大幅降低長線反射/振鈴（降 SWCLK 頻率無效，因頻率不影響邊緣速率）。
+        // 輸入端開 Schmitt 觸發抗雜訊，改善 SWDIO/SWDI 讀回穩定度。
+        swclk.set_drive_strength(Drive::_2mA);
+        swclk.set_slew_rate(SlewRate::Slow);
+        swdio.set_drive_strength(Drive::_2mA);
+        swdio.set_slew_rate(SlewRate::Slow);
+        swdio.set_schmitt(true);
+        if let Some(di) = &mut swdi {
+            di.set_schmitt(true);
+        }
 
         let loaded = common.load_program(&prg.program);
         let origin = loaded.origin as u32;
