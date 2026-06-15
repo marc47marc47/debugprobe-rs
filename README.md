@@ -56,10 +56,10 @@ RP2040 用 `elf2uf2-rs`，RP2350 用 `picotool`（family 不同）：
 ```bash
 # RP2040（Debug Probe / Pico）
 cargo install elf2uf2-rs
-elf2uf2-rs target/thumbv6m-none-eabi/release/debugprobe target/debugprobe.uf2
+elf2uf2-rs target/thumbv6m-none-eabi/release/debugprobe-rs target/debugprobe.uf2
 
 # RP2350（Pico 2）— 需 .elf 副檔名
-cp target/thumbv8m.main-none-eabihf/release/debugprobe target/p2.elf
+cp target/thumbv8m.main-none-eabihf/release/debugprobe-rs target/p2.elf
 picotool uf2 convert target/p2.elf target/debugprobe_on_pico2.uf2
 ```
 
