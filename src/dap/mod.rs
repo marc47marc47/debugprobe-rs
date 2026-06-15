@@ -59,6 +59,29 @@ const ACK_ERROR: u8 = 8; // parity / protocol（本地定義）
 /// DP RDBUFF 讀取請求（APnDP=0, RnW=1, A[3:2]=11）。
 const DP_RDBUFF_READ: u8 = REQ_RNW | (1 << 2) | (1 << 3);
 
+/// DAP 命令 ID → 名稱（供 OLED 活動顯示）。
+pub fn cmd_name(id: u8) -> &'static str {
+    match id {
+        ID_DAP_INFO => "Info",
+        ID_DAP_HOST_STATUS => "HostStatus",
+        ID_DAP_CONNECT => "Connect",
+        ID_DAP_DISCONNECT => "Disconnect",
+        ID_DAP_TRANSFER_CONFIGURE => "TransferCfg",
+        ID_DAP_TRANSFER => "Transfer",
+        ID_DAP_TRANSFER_BLOCK => "TransferBlk",
+        ID_DAP_TRANSFER_ABORT => "TransferAbrt",
+        ID_DAP_WRITE_ABORT => "WriteABORT",
+        ID_DAP_DELAY => "Delay",
+        ID_DAP_RESET_TARGET => "ResetTarget",
+        ID_DAP_SWJ_PINS => "SWJ_Pins",
+        ID_DAP_SWJ_CLOCK => "SWJ_Clock",
+        ID_DAP_SWJ_SEQUENCE => "SWJ_Seq",
+        ID_DAP_SWD_CONFIGURE => "SWD_Cfg",
+        ID_DAP_SWD_SEQUENCE => "SWD_Seq",
+        _ => "?",
+    }
+}
+
 fn u32_le(b: &[u8]) -> u32 {
     u32::from_le_bytes([b[0], b[1], b[2], b[3]])
 }

@@ -14,10 +14,15 @@ use embassy_rp::uart::BufferedUart;
 use embassy_usb::class::cdc_acm::CdcAcmClass;
 use embedded_io_async::{Read, Write};
 
+use crate::autobaud::{AutoBaud, MAGIC_BAUD};
 use crate::usbdev::ProbeDriver;
 
 #[embassy_executor::task]
-pub async fn uart_bridge_task(class: CdcAcmClass<'static, ProbeDriver>, mut uart: BufferedUart) {
+pub async fn uart_bridge_task(
+    class: CdcAcmClass<'static, ProbeDriver>,
+    mut uart: BufferedUart,
+    mut autobaud: AutoBaud<'static>,
+) {
     let (mut sender, mut receiver, control) = class.split_with_control();
     let mut ubuf = [0u8; 64];
     let mut dbuf = [0u8; 64];
@@ -33,11 +38,13 @@ pub async fn uart_bridge_task(class: CdcAcmClass<'static, ProbeDriver>, mut uart
             )
             .await
             {
-                // UART RX → USB
+                // UART RX → USB（client log）
                 Either3::First(res) => {
                     if let Ok(n) = res
                         && n > 0
                     {
+                        crate::UART_RX_BYTES
+                            .fetch_add(n as u32, core::sync::atomic::Ordering::Relaxed);
                         let _ = sender.write_packet(&ubuf[..n]).await;
                     }
                 }
@@ -46,6 +53,8 @@ pub async fn uart_bridge_task(class: CdcAcmClass<'static, ProbeDriver>, mut uart
                     if let Ok(n) = res
                         && n > 0
                     {
+                        crate::UART_TX_BYTES
+                            .fetch_add(n as u32, core::sync::atomic::Ordering::Relaxed);
                         let _ = utx.write_all(&dbuf[..n]).await;
                     }
                 }
@@ -57,7 +66,12 @@ pub async fn uart_bridge_task(class: CdcAcmClass<'static, ProbeDriver>, mut uart
         }
         if changed {
             let baud = receiver.line_coding().data_rate();
-            if baud > 0 {
+            if baud == MAGIC_BAUD {
+                // AutoBaud：量測目標 UART RX 的邊緣，偵測出真正的 baud 再套用。
+                if let Some(detected) = autobaud.detect().await {
+                    uart.set_baudrate(detected);
+                }
+            } else if baud > 0 {
                 uart.set_baudrate(baud);
             }
         }

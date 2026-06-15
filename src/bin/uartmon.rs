@@ -9,6 +9,7 @@
 
 use core::fmt::Write as _;
 use embassy_executor::Spawner;
+use embassy_rp::gpio::{Level, Output};
 use embassy_rp::i2c::{Config as I2cConfig, I2c};
 use embassy_rp::uart::{Config as UartConfig, Uart};
 use embedded_graphics::mono_font::MonoTextStyle;
@@ -46,11 +47,15 @@ async fn main(_spawner: Spawner) {
     cfg.baudrate = 115_200;
     let mut uart = Uart::new_blocking(p.UART0, p.PIN_0, p.PIN_1, cfg);
 
+    // 板載 LED (GP25)：每收到一個位元組翻轉，確認接收中。
+    let mut led = Output::new(p.PIN_25, Level::Low);
+
     let mut line: heapless::String<21> = heapless::String::new();
     let mut total: u32 = 0;
     loop {
         let mut b = [0u8; 1];
         if uart.blocking_read(&mut b).is_ok() {
+            led.toggle();
             let _ = uart.blocking_write(&b); // echo 回 host
             total = total.wrapping_add(1);
             let c = b[0];

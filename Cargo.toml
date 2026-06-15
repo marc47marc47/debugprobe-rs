@@ -1,6 +1,6 @@
 [package]
 name = "debugprobe"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 description = "Raspberry Pi Debug Probe firmware, rewritten in Rust on Embassy (RP2040 / RP2350)"
 license = "MIT"
@@ -8,7 +8,7 @@ license = "MIT"
 [dependencies]
 # --- Embassy async framework (取代 FreeRTOS) ---
 embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
-embassy-rp = { version = "0.10", features = ["time-driver", "critical-section-impl", "defmt", "binary-info"] }
+embassy-rp = { version = "0.10", features = ["time-driver", "critical-section-impl", "defmt", "binary-info", "unstable-pac"] }
 embassy-usb = { version = "0.6", features = ["defmt"] }
 embassy-time = { version = "0.5", features = ["defmt", "defmt-timestamp-uptime"] }
 embassy-sync = { version = "0.8", features = ["defmt"] }

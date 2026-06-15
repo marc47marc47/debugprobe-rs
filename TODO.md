@@ -95,11 +95,20 @@
 - [x] **關鍵 bug 修正**：`composite_with_iads = true` 時 embassy 要求 device class `0xEF/0x02/0x01`，原本設 0x00 導致 `Builder::new` panic、USB 從未列舉（用板上 OLED 逐階段標記定位）
 - [ ] （延後）Atomic/Queued commands 聚合（C 的環形雙緩衝最佳化）；目前每封包一命令
 
-## Phase 5 — DAP v1（HID）選用傳輸（延後，optional）
-> C 版為編譯期二選一（`PROTO_DAP_V1` vs `V2`），v2 為預設且已完成。HID 傳輸列為
-> 之後以 `proto-dap-v1` feature 提供的替代方案，價值較低，暫緩。
-- [ ] 加入 HID in/out 傳輸（對應 `PROTO_DAP_V1`），以 feature flag 在 v1/v2 間切換
-- [ ] **驗證**：在僅支援 v1 的工具（如舊版 Keil MDK）下可運作
+## Phase 5 — DAP v1（HID）傳輸 ✅ 實機驗證
+> 改良 C 的編譯期二選一 → **同時提供 v1 HID + v2 bulk**（`src/usb/mod.rs` 加 HID 介面，
+> `dap_task` 用 `select` 服務兩種來源）。一個 build 同時支援 probe-rs/OpenOCD(v2) 與
+> pyOCD/HID 工具(v1)。
+- [x] 加入 HID in/out 傳輸（vendor I/O report descriptor，64-byte report）
+- [x] dap_task 以 `select` 同時處理 v2 bulk 與 v1 HID（共用同一 Dap 核心）
+- [x] **驗證（實機）✅**：`pyocd list` 找到探針（`Raspberry Pi Debugprobe on Pico`）；
+      v2(probe-rs/OpenOCD) 無退化
+- 註：pyOCD 先前找不到是因 Windows 上 v2 需 libusb 後端；加 v1 HID 後改走 hidapi 即可
+
+## 額外 — OLED 活動顯示（layer 1）✅
+- [x] A 的 OLED 顯示最後收到的 host DAP 指令名稱 + 累計數、UART(client log) 收發位元組
+- [x] 用非阻塞 atomic 捕捉（LAST_DAP_CMD/UART_RX_BYTES/UART_TX_BYTES），OLED 僅在 DAP 閒置時 flush
+- [x] 兩板 LED 心跳（A=GP25、B=GP25）；B 的 uarthello/uartmon 皆顯示 OLED 狀態
 
 ## Phase 6 — UART 橋接（CDC-ACM）★里程碑 ✅（compile）
 - [x] 以 `CdcAcmClass` + `embassy_rp::uart::BufferedUart`（UART1, GPIO4/5）建立雙向橋接 task — `src/uart.rs`
@@ -115,13 +124,18 @@
 - [ ] （延後）HWFC / 軟體流控（RTS/CTS/DTR GPIO）
 - [ ] （延後）TX/RX LED（含 debounce）與 overflow 計數
 
-## Phase 7 — AutoBaud（PIO + DMA）⏸ 延後（含理由）
-> **延後理由**：embassy 的接腳所有權模型衝突 —— UART1 已擁有 GPIO5（RX），而
-> AutoBaud 的 PIO 頻率計數器需觀測同一支腳；embassy `make_pio_pin` 會奪走 funcsel，
-> 且 `Peri<PIN_5>` 無法雙重擁有。C 版可行是因 SDK 的 PIO 直接讀 GPIO 輸入同步器
-> 而不改 funcsel。在 embassy 要正確共享需設計 UART↔PIO 接腳交接，且需實機反覆驗證
-> （本環境無硬體）。演算法（雜湊表統計、validity 評分、魔術 baud 9728）待硬體階段補上。
-- [ ] 移植 `autobaud.pio` + 雙 DMA ring buffer + 估算邏輯（需解決接腳共享）
+## Phase 7 — AutoBaud（PIO1 邊緣計數）✅ 實機驗證
+> **接腳共享解法**：用 **PIO1** 透過 `embassy_rp::pac`（unstable-pac feature）直接設
+> SM 的 `pinctrl.in_base` / `execctrl.jmp_pin = GP5`，**不呼叫 make_pio_pin**（不更動
+> funcsel），因此 UART1 仍擁有 GP5、PIO1 只讀其輸入同步器（RP2040 GPIO 輸入對所有
+> 周邊永遠可見）。`src/autobaud.rs`。
+- [x] 移植 `autobaud.pio`（邊緣間隔計數，PIO1）
+- [x] 軟體讀 FIFO（取代 C 的雙 DMA）+ 「最短且重複出現間隔 = 1 bit time」估算
+- [x] 魔術 baud `9728` 觸發（`uart.rs` bridge 的 control_changed → `autobaud.detect()`）
+- [x] **驗證（實機）✅**：目標 B 跑 uarthello 以 115200 連續發送；主機 COM 設 9600 → 亂碼(3F 3F)，
+      切 9728 → AutoBaud 偵測出 115200 → 讀到清晰 `hello from target #87..90`
+- [x] **附帶修正**：A 的 OLED blocking I2C flush 會卡 executor 間歇打斷 DAP →
+      改為「DAP 活動中跳過 OLED flush」+ I2C 400kHz（`main.rs` 狀態迴圈）
 
 ## 額外 — 板上 OLED 狀態顯示（實機新增）✅
 - [x] SSD1306 128x64 I2C（I2C1: SCL=GP7, SDA=GP6）`src/display.rs`
@@ -150,11 +164,13 @@
       `debugprobe_on_pico2.uf2`(rp2350-arm-s)，family 由 `picotool info` 確認；命名對齊 C 版
       （RP2040 用 `elf2uf2-rs`、RP2350 用 `picotool uf2 convert`）
 
-## Phase 10 — 整合驗證與文件（部分完成）
-- [x] 撰寫根目錄 `README.md`（總覽 / 建置 / UF2 / 燒錄 / 與 C 差異 / 現況）
-- [x] 與 C 版功能比對：核心（SWD 偵錯 + UART 橋接）對等，延後項已列明
-- [ ] （需硬體）測試矩陣：probe-rs / OpenOCD / pyOCD 實機偵錯
-- [ ] （需硬體）UART loopback、Windows driverless 列舉驗證
+## Phase 10 — 整合驗證與文件（大致完成）
+- [x] 撰寫根目錄 `README.md`（總覽 / 建置 / UF2 / 燒錄 / 與 C 差異 / 現況）+ `TEST-plan.html`（接線圖）
+- [x] 與 C 版功能比對：核心（SWD 偵錯 + UART 橋接 + AutoBaud）對等，延後項已列明
+- [x] **測試矩陣（實機）✅**：`probe-rs info`/`download` 與 **OpenOCD**（`cmsis-dap.cfg` + `rp2040.cfg`）
+      皆成功 —— OpenOCD 認得 CMSIS-DAPv2、讀 DP IDCODE、**雙核 Cortex-M0+ examination 成功**、開 GDB server
+- [x] **Windows driverless ✅**：列舉為 WinUSB CMSIS-DAP v2，無需手動安裝驅動
+- [ ] （選用）pyOCD 測試（與 OpenOCD 類似，預期可用）
 
 ---
 

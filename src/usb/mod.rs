@@ -6,6 +6,10 @@
 use embassy_rp::peripherals::USB;
 use embassy_rp::usb::Driver;
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State as CdcState};
+use embassy_usb::class::hid::{
+    Config as HidConfig, HidBootProtocol, HidReader, HidReaderWriter, HidSubclass, HidWriter,
+    State as HidState,
+};
 use embassy_usb::driver::Driver as UsbDriverTrait;
 use embassy_usb::msos::{self, windows_version};
 use embassy_usb::{Builder, Config, UsbDevice};
@@ -20,11 +24,29 @@ pub type ProbeDriver = Driver<'static, USB>;
 pub type DapEpOut = <ProbeDriver as UsbDriverTrait<'static>>::EndpointOut;
 pub type DapEpIn = <ProbeDriver as UsbDriverTrait<'static>>::EndpointIn;
 
-/// CMSIS-DAP v2 的 bulk 傳輸端點（對應 C 的 OUT/IN endpoint）。
+/// CMSIS-DAP 傳輸：v2 bulk（probe-rs/OpenOCD）+ v1 HID（pyOCD/legacy）同時提供。
 pub struct DapTransport {
     pub read_ep: DapEpOut,
     pub write_ep: DapEpIn,
+    pub hid_reader: HidReader<'static, ProbeDriver, 64>,
+    pub hid_writer: HidWriter<'static, ProbeDriver, 64>,
 }
+
+/// CMSIS-DAP v1 HID report descriptor（vendor I/O，64-byte in/out）。
+const DAP_HID_REPORT_DESC: &[u8] = &[
+    0x06, 0x00, 0xFF, // Usage Page (Vendor 0xFF00)
+    0x09, 0x01, // Usage 1
+    0xA1, 0x01, // Collection (Application)
+    0x15, 0x00, //   Logical Minimum 0
+    0x26, 0xFF, 0x00, //   Logical Maximum 255
+    0x75, 0x08, //   Report Size 8
+    0x95, 0x40, //   Report Count 64
+    0x09, 0x01, //   Usage 1
+    0x81, 0x02, //   Input (Data,Var,Abs)
+    0x09, 0x01, //   Usage 1
+    0x91, 0x02, //   Output (Data,Var,Abs)
+    0xC0, // End Collection
+];
 
 /// WinUSB DeviceInterfaceGUID（對應 C `usb_descriptors.c` 的 desc_ms_os_20）。
 const DEVICE_INTERFACE_GUID: &str = "{CDB3B5AD-293B-4663-AA36-1AAE46463776}";
@@ -103,6 +125,28 @@ pub fn build(
     static CDC_STATE: StaticCell<CdcState> = StaticCell::new();
     let cdc = CdcAcmClass::new(&mut builder, CDC_STATE.init(CdcState::new()), 64);
 
+    // --- CMSIS-DAP v1 HID（pyOCD / legacy HID 工具）---
+    static HID_STATE: StaticCell<HidState> = StaticCell::new();
+    let hid_cfg = HidConfig {
+        report_descriptor: DAP_HID_REPORT_DESC,
+        request_handler: None,
+        poll_ms: 1,
+        max_packet_size: 64,
+        hid_subclass: HidSubclass::No,
+        hid_boot_protocol: HidBootProtocol::None,
+    };
+    let hid = HidReaderWriter::<_, 64, 64>::new(&mut builder, HID_STATE.init(HidState::new()), hid_cfg);
+    let (hid_reader, hid_writer) = hid.split();
+
     let device = builder.build();
-    (device, DapTransport { read_ep, write_ep }, cdc)
+    (
+        device,
+        DapTransport {
+            read_ep,
+            write_ep,
+            hid_reader,
+            hid_writer,
+        },
+        cdc,
+    )
 }
