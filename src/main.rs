@@ -8,9 +8,10 @@
 #![no_main]
 
 use core::fmt::Write as _;
-use embassy_executor::Spawner;
-use portable_atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use embassy_executor::{Executor, Spawner};
+use portable_atomic::{AtomicU8, AtomicU32, Ordering};
 use embassy_rp::gpio::{Level, Output};
+use embassy_rp::multicore::{Stack, spawn_core1};
 use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
 use embassy_rp::uart::{BufferedInterruptHandler, BufferedUart};
 use embassy_rp::usb::Driver;
@@ -53,12 +54,34 @@ bind_interrupts!(struct Irqs {
     UART1_IRQ => BufferedInterruptHandler<UART1>;
 });
 
-// 跨 task 共享狀態，供 OLED 狀態畫面顯示（皆為非阻塞 atomic，不增加 OLED flush 頻率）。
-static USB_UP: AtomicBool = AtomicBool::new(false);
-static DAP_COMMANDS: AtomicU32 = AtomicU32::new(0);
-static LAST_DAP_CMD: AtomicU8 = AtomicU8::new(0xFF); // 最後收到的 DAP 指令 ID
+// 跨 task 共享狀態（非阻塞 atomic）。事件用 token ring（環形緩衝，最新覆蓋最舊、無溢出）。
+const EVT_N: usize = 3; // 環深度（配合 OLED 顯示行數）
+static EVT_RING: [AtomicU8; EVT_N] = [
+    AtomicU8::new(0xFF),
+    AtomicU8::new(0xFF),
+    AtomicU8::new(0xFF),
+];
+static EVT_SEQ: AtomicU32 = AtomicU32::new(0); // 單調寫入序號（單一寫入者 = dap_task）
 static UART_RX_BYTES: AtomicU32 = AtomicU32::new(0); // 目標→host（client log）
 static UART_TX_BYTES: AtomicU32 = AtomicU32::new(0); // host→目標
+
+/// 記錄一筆 DAP 事件（dap_task 單一寫入者）。
+fn record_evt(id: u8) {
+    let s = EVT_SEQ.load(Ordering::Relaxed);
+    EVT_RING[(s as usize) % EVT_N].store(id, Ordering::Relaxed);
+    EVT_SEQ.store(s.wrapping_add(1), Ordering::Relaxed);
+}
+
+/// 取第 i 新的事件名稱（i=0 最新）；無則回空字串。
+fn evt_name(i: u32) -> &'static str {
+    let seq = EVT_SEQ.load(Ordering::Relaxed);
+    if seq > i {
+        let idx = ((seq - 1 - i) as usize) % EVT_N;
+        dap::cmd_name(EVT_RING[idx].load(Ordering::Relaxed))
+    } else {
+        ""
+    }
+}
 
 /// 跑 USB 裝置主迴圈（對應 C 的 usb_thread / tud_task）。
 #[embassy_executor::task]
@@ -76,7 +99,6 @@ async fn dap_task(mut transport: usbdev::DapTransport, mut dap: dap::Dap<'static
     let mut resp = [0u8; 64];
 
     transport.read_ep.wait_enabled().await;
-    USB_UP.store(true, Ordering::Relaxed);
     loop {
         // 同時等 v2 bulk OUT 與 v1 HID OUT，任一到達即處理。
         match select(
@@ -87,23 +109,46 @@ async fn dap_task(mut transport: usbdev::DapTransport, mut dap: dap::Dap<'static
         {
             // CMSIS-DAP v2 (bulk)
             Either::First(Ok(n)) if n > 0 => {
-                LAST_DAP_CMD.store(bulk_req[0], Ordering::Relaxed);
+                record_evt(bulk_req[0]);
                 let len = dap.execute_command(&bulk_req[..n], &mut resp).await;
-                DAP_COMMANDS.fetch_add(1, Ordering::Relaxed);
                 if len > 0 {
                     let _ = transport.write_ep.write(&resp[..len]).await;
                 }
             }
             // CMSIS-DAP v1 (HID)：報告固定 64 bytes
             Either::Second(Ok(_)) => {
-                LAST_DAP_CMD.store(hid_req[0], Ordering::Relaxed);
+                record_evt(hid_req[0]);
                 resp.fill(0);
                 let _ = dap.execute_command(&hid_req, &mut resp).await;
-                DAP_COMMANDS.fetch_add(1, Ordering::Relaxed);
                 let _ = transport.hid_writer.write(&resp).await;
             }
             _ => {}
         }
+    }
+}
+
+/// OLED 每 3 秒批次顯示，跑在 **core1**。
+#[embassy_executor::task]
+async fn oled_task(mut dbg: display::DebugOled, mut led: Output<'static>) {
+    loop {
+        led.toggle();
+        let mut l_ver: heapless::String<21> = heapless::String::new();
+        let _ = write!(l_ver, "debugprobe-rs {}", env!("CARGO_PKG_VERSION"));
+        let mut l_uart: heapless::String<21> = heapless::String::new();
+        let _ = write!(
+            l_uart,
+            "rx:{} tx:{}",
+            UART_RX_BYTES.load(Ordering::Relaxed),
+            UART_TX_BYTES.load(Ordering::Relaxed)
+        );
+        dbg.status(&[
+            l_ver.as_str(),
+            evt_name(0),
+            evt_name(1),
+            evt_name(2),
+            l_uart.as_str(),
+        ]);
+        Timer::after(Duration::from_millis(3000)).await;
     }
 }
 
@@ -172,44 +217,24 @@ async fn main(spawner: Spawner) {
 
     // --- 存活指示 LED（對應 C 的 PROBE_USB_CONNECTED_LED）---
     #[cfg(feature = "board-debug-probe")]
-    let led_pin = p.PIN_2;
+    let led = Output::new(p.PIN_2, Level::Low);
     #[cfg(any(feature = "board-pico", feature = "board-pico2"))]
-    let led_pin = p.PIN_25;
+    let led = Output::new(p.PIN_25, Level::Low);
 
-    let mut led = Output::new(led_pin, Level::Low);
+    // --- 多核心 affinity：OLED+LED → core1；core0 留 USB/DAP/UART/AutoBaud ---
+    // core1 的 blocking I2C flush 不影響 core0；stack 放大到 32KB 排除溢位。
+    static mut CORE1_STACK: Stack<32768> = Stack::new();
+    static EXECUTOR1: StaticCell<Executor> = StaticCell::new();
+    spawn_core1(
+        p.CORE1,
+        unsafe { &mut *core::ptr::addr_of_mut!(CORE1_STACK) },
+        move || {
+            let executor1 = EXECUTOR1.init(Executor::new());
+            executor1.run(|s| s.spawn(oled_task(dbg, led).unwrap()));
+        },
+    );
 
-    // --- OLED 狀態畫面 + LED 心跳 ---
-    // 注意：OLED flush 是 blocking I2C（~10ms@400kHz）會卡住 executor，
-    // 因此在 DAP 活動中（偵錯/燒錄）跳過 OLED 更新，避免打斷 DAP/UART。
-    let mut last_dap = 0u32;
-    loop {
-        led.toggle();
-        let dap = DAP_COMMANDS.load(Ordering::Relaxed);
-        let dap_active = dap != last_dap;
-        last_dap = dap;
-        if !dap_active {
-            let usb = if USB_UP.load(Ordering::Relaxed) {
-                "USB connected"
-            } else {
-                "USB waiting"
-            };
-            // 最後收到的 host 指令 + UART(client log) 收發量
-            let mut l_cmd: heapless::String<21> = heapless::String::new();
-            let _ = write!(
-                l_cmd,
-                "DAP {} #{}",
-                dap::cmd_name(LAST_DAP_CMD.load(Ordering::Relaxed)),
-                dap
-            );
-            let mut l_uart: heapless::String<21> = heapless::String::new();
-            let _ = write!(
-                l_uart,
-                "UART rx{} tx{}",
-                UART_RX_BYTES.load(Ordering::Relaxed),
-                UART_TX_BYTES.load(Ordering::Relaxed)
-            );
-            dbg.status(&["debugprobe-rs", usb, l_cmd.as_str(), l_uart.as_str()]);
-        }
-        Timer::after(Duration::from_millis(500)).await;
-    }
+    // 重要：core0 的 main task 必須**不返回**。實測若 spawn_core1 後讓 main 返回，
+    // core0 的 DAP AP 存取會一致失敗（DP 可讀、AP 壞）；park 住 main 即正常。
+    core::future::pending::<()>().await;
 }

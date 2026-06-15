@@ -144,6 +144,63 @@
 - [x] 開發過程用單字元階段標記定位 `Builder::new` panic（device class bug）
 - [ ] （選用）顯示目標 IDCODE / UART 收發位元組數
 
+## Phase 8 補完 — binary_info ✅ / 多核心 ❌（嘗試後撤回）
+- [x] **binary_info picotool 顯示修正** ✅：根因是 picotool 在 rp2040 只掃 boot2 後前 256B
+      找 header，原本 `.boot_info` 放在 `.text` 之後掃不到。依 rp-binary-info 文件改放
+      `INSERT AFTER .vector_table` + `_stext = ADDR(.boot_info)+SIZEOF(.boot_info)`
+      （`memory_rp2040.x`）。`picotool info` 現顯示 name/version/description；probe-rs 無退化。
+- [x] **多核心 affinity（後來達成，見下方 MC-2）** —— 初次嘗試失敗紀錄如下，真因實為
+      「core0 main task 返回」而非 core1；於 MC-2 修正後成功。以下保留初次誤判分析供參。
+- [ ] ~~多核心 affinity（初次嘗試後撤回，誤判為無法實現）~~
+  - **嘗試**：`spawn_core1` 把 OLED+LED 狀態迴圈搬到 core1，core0 留 USB/DAP/UART/AutoBaud
+    （對應 C 的 `vTaskCoreAffinitySet`）。編譯通過、DebugOled/Output 皆 Send。
+  - **故障（實機、一致可重現）**：USB 列舉正常、probe-rs 偵測到探針、**DP IDCODE(DPIDR) 可讀**，
+    但 **AP(Access Port) 存取一致失敗**（"error in communication with access port or debug port"，
+    100kHz 降速亦同）。撤回單核後立即恢復 → 確認為多核心所致。
+  - **推測原因**（未深入定位，屬 optional 故不續查）：
+    1. RP2040 thumbv6m 上 `critical-section-impl` 與 `portable-atomic` 皆用**跨核全域硬體
+       spinlock**；兩核同時頻繁取臨界區（core0：SWD 傳輸+atomic+embassy-time；core1：OLED
+       blocking I2C+atomic+embassy-time）造成競爭，可能在 AP 多階段傳輸的關鍵時刻 stall core0。
+    2. USB/PIO 中斷綁在 core0；把 USB 相依的 DAP pipeline 跨核切分，與 embassy「周邊由單一
+       executor 擁有、中斷在單核」的模型不合。DP 單筆讀成功、AP 的 posted-read + RDBUFF +
+       WAIT-retry 多階段序列較敏感而失敗。
+  - **結論**：C 能做 affinity 是因 FreeRTOS+TinyUSB 有為跨核設計的顯式鎖；embassy 的型別安全
+    單-executor 模型不適合切分 USB-coupled 的 DAP。且**單核已足**：M0+ @125MHz async 協作排程
+    已能順暢交錯 USB/DAP/UART/OLED（唯一阻塞的 OLED I2C 用「DAP 活動跳過」處理），
+    probe-rs/OpenOCD/pyOCD + AutoBaud + UART 橋接全部單核驗證通過。多核心為純效能優化，非功能需求。
+
+## 批次化 OLED + 重做多核心（MC 系列）
+> OLED 改每 3s 批次（不即時逐事件）；版面拿掉標題，改成 pg version + 最近數筆事件 + rx/tx；
+> 事件用 token ring（環形緩衝，最新覆蓋最舊、無溢出）。在此基礎上重做多核心，
+> 並推測先前失敗真因為 core1 stack 溢位（放大到 32KB 排除）。詳見 plan 檔。
+
+### Phase MC-1 — 批次化 OLED + token ring（單核，低風險，獨立可用）✅
+- [x] token ring：`EVT_RING: [AtomicU8; 3]` + `EVT_SEQ: AtomicU32`；dap_task 單一寫入（`record_evt`）；移除 `LAST_DAP_CMD`/`USB_UP`/`DAP_COMMANDS`
+- [x] OLED 內容：`debugprobe-rs <ver>`(env!) + 最近 3 筆事件(`evt_name`/cmd_name) + `rx:n tx:m`（沿用 display.rs 排版）
+- [x] OLED 迴圈改 3s 批次（core0），移除 `dap_active` 跳過；LED 3s 心跳
+- [x] **驗證**：probe-rs AP 存取正常（MemoryAP+ROM，單核基準）；OLED 新版面待使用者目視確認
+
+### Phase MC-2 — 重做多核心（OLED→core1）✅ 成功
+- [x] `spawn_core1` + 第二 `Executor` + `CORE1_STACK=32KB`；批次 OLED task 移 core1
+- [x] core0 留 USB/DAP/UART/AutoBaud
+- [x] **真因修正（關鍵）**：core0 的 `main` task **不可返回**！spawn_core1 後讓 main 返回會使
+      core0 DAP **AP 存取一致失敗**（DP 可讀、AP 壞）；`main` 結尾加 `core::future::pending().await`
+      park 住即解決。先前誤判為「core1 本身」，實為 embassy main task 返回所致。
+- [x] **驗證（硬性閘通過）**：`probe-rs info` 顯示 MemoryAP + ROM 0xe00ff000（一致，重試皆過）；
+      OpenOCD 雙核 examination 成功；三板建置 + clippy 零警告。OLED core1 3s 更新待目視確認。
+
+### Phase MC-3 — 結果處置與提交
+- [ ] 成功 → 多核心達成，TODO 標 ✅，commit + tag v0.3.1
+- [ ] 失敗（AP 仍壞）→ 回退單核（保留 MC-1 批次 OLED），TODO 記錄根因，commit + tag v0.3.1
+
+## 極限效能 / 壓力測試（ST 系列）✅ 完成 — 詳見 `STRESS-test.md`
+- [x] ST-0：B 燒 `src/bin/uartecho.rs`（UART0 全速 echo，baud 為 const）
+- [x] ST-1 SWD：最高穩定 **15.6MHz**（31.25MHz 失敗）；讀 **~94 KiB/s**、寫 **~203 KiB/s**；瓶頸 USB-FS+DAP
+- [x] ST-2 UART：最高無遺失 **2.5 Mbaud**（3M 掉資料）；峰值 **~209 KB/s** round-trip
+- [x] ST-3 soak：30×128KB 連讀 **30/30、0 錯誤、3.84MB**，事後 AP 正常；多核心重載穩定
+- [x] ST-4 DAP 速率：單筆 **~3.6k transfers/s**（USB 往返限制）；block ~24k(讀)/52k(寫) words/s
+- [x] ST-5：彙整 `STRESS-test.md`（最大負荷一覽 + 瓶頸分析）
+
 ## Phase 8 — 系統穩定性 / 多核心 / 省電（部分完成）
 - [x] panic / 錯誤處理（`panic-probe` + `defmt`；no_alloc 故無 malloc hook）
 - [x] `binary_info`（程式名/描述/版本，`src/main.rs`；對應 C `bi_decl`）— 三板皆建置；
