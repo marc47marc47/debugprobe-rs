@@ -1,0 +1,36 @@
+# 預設建置 RP2040 (thumbv6m)。
+# RP2350 (Pico 2) 請用：
+#   cargo build --target thumbv8m.main-none-eabihf --no-default-features --features board-pico2
+[build]
+target = "thumbv6m-none-eabi"
+
+[target.thumbv6m-none-eabi]
+runner = "probe-rs run --chip RP2040"
+rustflags = [
+    "-C", "link-arg=--nmagic",
+    "-C", "link-arg=-Tlink.x",
+    "-C", "link-arg=-Tlink-rp.x",
+    "-C", "link-arg=-Tdefmt.x",
+]
+
+# RP2350：image def 由 embassy-rp 自動置於 .start_block，
+# section 放置由 memory_rp2350.x 提供，故不需 link-rp.x。
+[target.thumbv8m.main-none-eabihf]
+runner = "probe-rs run --chip RP235x"
+rustflags = [
+    "-C", "link-arg=--nmagic",
+    "-C", "link-arg=-Tlink.x",
+    "-C", "link-arg=-Tdefmt.x",
+]
+
+[env]
+DEFMT_LOG = "debug"
+
+# 三板建置別名（對應 C 版的 debugprobe.uf2 / _on_pico / _on_pico2）。
+# 產生 UF2：先 `cargo install elf2uf2-rs`，再對 ELF 執行 elf2uf2-rs（見 README）。
+[alias]
+build-probe = "build --release --no-default-features --features board-debug-probe"
+build-pico = "build --release --no-default-features --features board-pico"
+build-pico2 = "build --release --target thumbv8m.main-none-eabihf --no-default-features --features board-pico2"
+# 透過 SWD 燒錄器直接燒錄 + RTT log（需 probe-rs）。
+run-probe = "run --release --no-default-features --features board-debug-probe"

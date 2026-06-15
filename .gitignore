@@ -1,0 +1,11 @@
+/target
+
+# 內嵌的 C 參考實作（上游 raspberrypi/debugprobe，有自己的 git repo）
+/debugprobe/
+
+# 參考資料表 / 大型二進位
+*.pdf
+
+# 測試暫存
+/comout.txt
+/*.ps1

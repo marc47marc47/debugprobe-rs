@@ -1,0 +1,60 @@
+[package]
+name = "debugprobe"
+version = "0.2.1"
+edition = "2024"
+description = "Raspberry Pi Debug Probe firmware, rewritten in Rust on Embassy (RP2040 / RP2350)"
+license = "MIT"
+
+[dependencies]
+# --- Embassy async framework (取代 FreeRTOS) ---
+embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
+embassy-rp = { version = "0.10", features = ["time-driver", "critical-section-impl", "defmt", "binary-info"] }
+embassy-usb = { version = "0.6", features = ["defmt"] }
+embassy-time = { version = "0.5", features = ["defmt", "defmt-timestamp-uptime"] }
+embassy-sync = { version = "0.8", features = ["defmt"] }
+embassy-futures = "0.1"
+embedded-io-async = "0.7"
+
+# --- Cortex-M runtime / 同步原語 ---
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+critical-section = "1.2"
+portable-atomic = { version = "1", features = ["critical-section"] }
+static_cell = "2.1"
+heapless = "0.9"
+
+# --- PIO 組譯 (SWD / AutoBaud 物理層) ---
+pio = "0.3"
+pio-proc = "0.3"
+fixed = "1"
+
+# 板上 OLED 狀態顯示（SSD1306 0.96" 128x64 I2C）
+ssd1306 = "0.10"
+embedded-graphics = "0.8"
+
+# --- 除錯輸出 (取代 probe_info/printf) ---
+defmt = "1"
+defmt-rtt = "1"
+panic-probe = { version = "1", features = ["print-defmt"] }
+
+[features]
+default = ["board-debug-probe"]
+
+# 晶片選擇 (對應 C 的 PICO_BOARD / target)
+rp2040 = ["embassy-rp/rp2040"]
+rp2350 = ["embassy-rp/rp235xa"]
+
+# 板級選擇 (對應 C 的 board_*.h / DEBUG_ON_PICO)
+board-debug-probe = ["rp2040"]   # 正式 Debug Probe 硬體 → debugprobe.uf2
+board-pico = ["rp2040"]          # Pico 1 → debugprobe_on_pico.uf2
+board-pico2 = ["rp2350"]         # Pico 2 → debugprobe_on_pico2.uf2
+
+[profile.dev]
+opt-level = "s"      # Cortex-M 需要最佳化才能符合大小/時序
+debug = 2
+
+[profile.release]
+opt-level = "s"
+debug = 2
+lto = "fat"
+codegen-units = 1
