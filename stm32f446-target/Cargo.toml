@@ -1,0 +1,43 @@
+[package]
+name = "stm32f446-target"
+version = "0.1.0"
+edition = "2024"
+description = "Nucleo-F446RE layer-2 測試韌體（OLED + LED + UART rx/tx），由 debugprobe-rs 探針經 SWD 燒錄驗證"
+license = "MIT"
+
+# 空 [workspace] 讓本 crate 與根目錄 debugprobe-rs 解耦，
+# 不被根 .cargo/config.toml 的預設 thumbv6m target 影響、也不被當成 workspace 成員。
+[workspace]
+
+[dependencies]
+# Embassy（STM32F446RE，HAL 與 RP2040 版概念對等）
+embassy-stm32 = { version = "0.6", features = ["stm32f446re", "memory-x", "time-driver-any", "exti", "defmt"] }
+embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread", "defmt"] }
+embassy-time = { version = "0.5", features = ["defmt"] }
+embassy-futures = "0.1"
+embedded-io-async = "0.7"
+
+# critical-section-single-core：F446 單核，提供 critical-section 實作（embassy-stm32 不自帶）。
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7"
+static_cell = "2.1"
+heapless = "0.9"
+
+# OLED 狀態顯示（與探針/RP2040 測試韌體相同）
+ssd1306 = "0.10"
+embedded-graphics = "0.8"
+
+# 除錯輸出
+defmt = "1"
+defmt-rtt = "1"
+panic-probe = { version = "1", features = ["print-defmt"] }
+
+[profile.dev]
+opt-level = "s"
+debug = 2
+
+[profile.release]
+opt-level = "s"
+debug = 2
+lto = "fat"
+codegen-units = 1

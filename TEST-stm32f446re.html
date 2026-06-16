@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>接線計畫：Nucleo STM32F446RE 作為 layer 2</title>
+<style>
+  body { font-family: "Segoe UI", "Microsoft JhengHei", system-ui, sans-serif;
+         max-width: 1000px; margin: 24px auto; padding: 0 16px; color: #1c1e21; line-height: 1.6; }
+  h1 { border-bottom: 3px solid #2a7; padding-bottom: 6px; }
+  h2 { margin-top: 30px; border-left: 5px solid #2a7; padding-left: 10px; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+  th, td { border: 1px solid #ccd; padding: 6px 10px; text-align: left; font-size: 14px; }
+  th { background: #eef6f1; }
+  code { background: #f3f4f6; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #1e1e1e; color: #d4d4d4; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 13px; }
+  .warn { background:#fff6e5; border-left:5px solid #e9a100; padding:10px 14px; border-radius:4px; }
+  .pill { display:inline-block; background:#c0392b; color:#fff; border-radius:12px; padding:1px 10px; font-size:13px; }
+  figcaption { color:#667; font-size:13px; margin-top:4px; }
+  .sw { color:#c33; } .ua { color:#27a; } .i2 { color:#a6a; } .pw { color:#777; }
+</style>
+</head>
+<body>
+
+<h1>接線計畫 + 測試紀錄：Nucleo STM32F446RE 作為 layer 2 目標</h1>
+<p><span style="display:inline-block;background:#2a7;color:#fff;border-radius:12px;padding:1px 10px;font-size:13px">✅ 已實機驗證 2026-06-16</span>
+用 debugprobe-rs 探針把 Nucleo-F446RE（STM32F446RET6, Cortex-M4F）當 layer 2：SWD 燒錄/重置 +
+USB-to-UART 橋接 + OLED + LED。純文字版見 <a href="TEST-stm32f446re.md">TEST-stm32f446re.md</a>。</p>
+
+<div class="warn">
+<b><span class="pill">關鍵</span> 先移除 CN2 兩顆 "ST-LINK" 跳線</b>——Nucleo 有板載 ST-LINK，
+不移除會與外部探針在 SWD 上衝突（徵狀：DP 讀得到、AHB 失敗）。JP6(IDD) 保持插上、由 Nucleo 自身 CN1 USB 供電。
+</div>
+
+<h2>接線圖</h2>
+<figure>
+<svg viewBox="0 0 940 500" xmlns="http://www.w3.org/2000/svg" font-family="Consolas, monospace" font-size="13">
+  <defs>
+    <marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#333"/>
+    </marker>
+  </defs>
+
+  <rect x="370" y="14" width="200" height="40" rx="6" fill="#eef" stroke="#557"/>
+  <text x="470" y="39" text-anchor="middle" font-weight="bold">主機 PC</text>
+  <line x1="470" y1="54" x2="150" y2="92" stroke="#777" stroke-width="2"/>
+  <text x="255" y="66" fill="#777">USB：CMSIS-DAP v2 + CDC-ACM</text>
+
+  <!-- Probe A -->
+  <rect x="30" y="92" width="240" height="232" rx="8" fill="#f6fbf8" stroke="#2a7" stroke-width="2"/>
+  <text x="150" y="116" text-anchor="middle" font-weight="bold">Probe A（Pico）</text>
+  <text x="150" y="134" text-anchor="middle" fill="#557">debugprobe-rs · board-pico</text>
+  <text x="150" y="150" text-anchor="middle" fill="#889">E6605838834DA330</text>
+  <text x="48" y="182" class="sw">GP2  SWCLK</text>
+  <text x="48" y="206" class="sw">GP3  SWDIO</text>
+  <text x="48" y="230" class="sw">GP1  nRESET</text>
+  <text x="48" y="258" class="ua">GP4  UART1 TX</text>
+  <text x="48" y="282" class="ua">GP5  UART1 RX</text>
+  <text x="48" y="310" class="pw">GND</text>
+
+  <!-- Nucleo -->
+  <rect x="650" y="92" width="260" height="312" rx="8" fill="#eef3fb" stroke="#37c" stroke-width="2"/>
+  <text x="780" y="116" text-anchor="middle" font-weight="bold">Nucleo-F446RE</text>
+  <text x="780" y="134" text-anchor="middle" fill="#557">STM32F446RET6 · CN1 USB 供電</text>
+  <text x="780" y="150" text-anchor="middle" fill="#c0392b">★ CN2 兩顆跳線：移除 ★</text>
+  <text x="778" y="182" class="sw">PA14 SWCLK</text>
+  <text x="778" y="206" class="sw">PA13 SWDIO</text>
+  <text x="778" y="230" class="sw">NRST (CN6)</text>
+  <text x="778" y="258" class="ua">PA10 USART1 RX (D2)</text>
+  <text x="778" y="282" class="ua">PA9  USART1 TX (D8)</text>
+  <text x="778" y="310" class="pw">GND (CN6)</text>
+  <text x="778" y="338" class="i2">PB8/PB9 I2C1 (D15/D14)</text>
+  <text x="778" y="362" fill="#c63">PA5 LED（LD2, 板載）</text>
+
+  <line x1="170" y1="178" x2="775" y2="178" stroke="#c33" stroke-width="2" marker-end="url(#ar)"/>
+  <line x1="170" y1="202" x2="775" y2="202" stroke="#c33" stroke-width="2" marker-end="url(#ar)"/>
+  <line x1="775" y1="202" x2="172" y2="202" stroke="#c33" stroke-width="2" marker-end="url(#ar)"/>
+  <line x1="175" y1="226" x2="775" y2="226" stroke="#c33" stroke-width="2" marker-end="url(#ar)"/>
+  <line x1="185" y1="254" x2="775" y2="254" stroke="#27a" stroke-width="2" marker-end="url(#ar)"/>
+  <line x1="775" y1="278" x2="187" y2="278" stroke="#27a" stroke-width="2" marker-end="url(#ar)"/>
+  <line x1="120" y1="306" x2="775" y2="306" stroke="#999" stroke-width="2" stroke-dasharray="4 3"/>
+
+  <!-- OLED -->
+  <rect x="30" y="356" width="240" height="86" rx="8" fill="#fdf7fd" stroke="#a6a"/>
+  <text x="150" y="378" text-anchor="middle" font-weight="bold">SSD1306 OLED 0.96"</text>
+  <text x="48" y="402" class="i2">SCL / SDA</text>
+  <text x="48" y="424" class="pw">VCC 3V3 / GND</text>
+  <line x1="180" y1="398" x2="778" y2="332" stroke="#a6a" stroke-width="2" marker-end="url(#ar)"/>
+
+  <rect x="305" y="420" width="330" height="54" rx="6" fill="#fafafa" stroke="#ddd"/>
+  <text x="319" y="440"><tspan class="sw">━ SWD</tspan>　<tspan class="ua">━ UART</tspan>　<tspan class="i2">━ I2C</tspan>　<tspan class="pw">┄ GND</tspan></text>
+  <text x="319" y="462" fill="#667">箭頭＝訊號方向；雙箭頭＝雙向（SWDIO / UART）</text>
+</svg>
+<figcaption>移除 CN2 後，探針 A 經 SWD（含 nRESET）燒錄/偵錯 onboard F446，並以 UART 雙向橋接；OLED 由 I2C1 驅動。</figcaption>
+</figure>
+
+<h2>跳線插法</h2>
+<table>
+  <tr><th>跳線</th><th>設定</th><th>原因</th></tr>
+  <tr><td><b>CN2（兩顆 "ST-LINK"）</b></td><td><b style="color:#c0392b">移除兩顆</b></td><td>斷開板載 ST-LINK 與 onboard 目標的 SWD，讓外部探針獨佔</td></tr>
+  <tr><td>JP6（IDD）</td><td>保持插上</td><td>目標 MCU 供電路徑</td></tr>
+  <tr><td>電源選擇（U5V/E5V）</td><td>保持預設 U5V</td><td>由 Nucleo 自身 CN1 USB 供電</td></tr>
+</table>
+
+<h2>接線對照</h2>
+<table>
+  <tr><th>探針 A</th><th>訊號</th><th>F446 腳</th><th>Arduino 絲印</th></tr>
+  <tr><td>GP2</td><td class="sw">SWCLK</td><td>PA14</td><td>CN7 morpho / CN2 目標側</td></tr>
+  <tr><td>GP3</td><td class="sw">SWDIO</td><td>PA13</td><td>CN7 morpho / CN2 目標側</td></tr>
+  <tr><td>GP1</td><td class="sw">nRESET</td><td>NRST</td><td>CN6 <code>NRST</code></td></tr>
+  <tr><td>GP4</td><td class="ua">UART1 TX →</td><td>PA10 (USART1 RX)</td><td>D2（CN9）</td></tr>
+  <tr><td>GP5</td><td class="ua">← UART1 RX</td><td>PA9 (USART1 TX)</td><td>D8（CN5）</td></tr>
+  <tr><td>GND</td><td class="pw">共地</td><td>GND</td><td>CN6 GND</td></tr>
+  <tr><td>—</td><td class="i2">OLED SCL</td><td>PB8 (I2C1 SCL)</td><td>D15（CN5）</td></tr>
+  <tr><td>—</td><td class="i2">OLED SDA</td><td>PB9 (I2C1 SDA)</td><td>D14（CN5）</td></tr>
+  <tr><td>—</td><td class="pw">OLED VCC/GND</td><td>3V3 / GND</td><td>CN6</td></tr>
+</table>
+<p style="font-size:13px;color:#667">避開 PA2/PA3（USART2 接 ST-LINK VCP，會爭線）→ 用 USART1。SWD 用短線、就近接地。</p>
+
+<h2>實測結果（2026-06-16）<span style="color:#2a7">✅ 全部通過</span></h2>
+<table>
+  <tr><th>驗證項</th><th>結果</th></tr>
+  <tr><td>SWD 連線（DPIDR 0x2BA01477 / device id 0x421 / ROM table）</td><td class="ok">✅</td></tr>
+  <tr><td>清除 RDP Level 1（<code>stm32f2x unlock</code>，mass erase）</td><td class="ok">✅</td></tr>
+  <tr><td><b>SWD 燒錄</b>（32768 B；vector <code>SP=0x20020000</code> / <code>PC=0x080001c5</code>）</td><td class="ok">✅</td></tr>
+  <tr><td>韌體運行（計數遞增）</td><td class="ok">✅</td></tr>
+  <tr><td>UART TX <code>hello from f446 #n</code></td><td class="ok">✅</td></tr>
+  <tr><td>UART RX echo（送 <code>F446-ECHO-OK</code> → 收回同字串）</td><td class="ok">✅</td></tr>
+</table>
+
+<div class="warn">
+<b>兩個 Nucleo 專屬眉角（實測）</b>：
+<ol style="margin:6px 0">
+  <li>本顆 F446 <b>帶 RDP Level 1</b>（Nucleo 少見但確有）→ 跟 Black Pill 一樣先 <code>stm32f2x unlock 0</code>（mass erase）+ 拔插 CN1 USB 重新上電。</li>
+  <li><b>NRST 與板載 ST-LINK 共線</b> → 任何走 reset 的燒錄（<code>probe-rs download</code>、OpenOCD <code>program</code>）都卡在「halt 後 reset timeout」。
+      但讀 DHCSR 發現 <b>純 <code>halt</code> 其實成功</b>（<code>0x00030003</code>，S_HALT=1）→ 繞道：<code>halt → flash write_image → SYSRESETREQ run</code>。</li>
+</ol>
+</div>
+
+<h2>可靠燒錄流程（本板實際使用）</h2>
+<pre>cd stm32f446-target &amp;&amp; cargo build --release
+
+# 1. 清 RDP（connect_assert_srst；印 "unlocked." 後拔插 CN1 USB 重新上電）
+openocd -f interface/cmsis-dap.cfg -c "transport select swd" -c "adapter speed 1000" \
+  -f target/stm32f4x.cfg -c "reset_config srst_only srst_nogate connect_assert_srst" \
+  -c "init" -c "catch { reset halt }" -c "catch { halt }" -c "stm32f2x unlock 0" -c "reset run" -c "shutdown"
+
+# 2. 燒錄：halt → flash write_image（避開會卡的 reset-halt）→ SYSRESETREQ run
+openocd -f interface/cmsis-dap.cfg -c "transport select swd" -c "adapter speed 1000" \
+  -f target/stm32f4x.cfg -c "reset_config none" -c "cortex_m reset_config sysresetreq" \
+  -c "init" -c "catch { halt }" \
+  -c "flash write_image erase stm32f446-target/target/thumbv7em-none-eabihf/release/stm32f446-target" \
+  -c "catch { reset run }" -c "shutdown"</pre>
+<p style="font-size:13px;color:#667">若你的 Nucleo NRST 無共線干擾，<code>probe-rs download --chip STM32F446RETx</code> 應可直接用。
+判準：LD2(PA5) 閃、OLED 顯示 <code>f446 layer2</code>/<code>tx{n} rx{n}</code>、CDC COM @115200 收到
+<code>hello from f446 #n</code> 且打字被 echo 回。</p>
+
+<p style="color:#778;font-size:13px;margin-top:28px">細節見 <a href="MULTI-TARGET.md">MULTI-TARGET.md</a> · <a href="TEST-stm32f446re.md">TEST-stm32f446re.md</a></p>
+
+</body>
+</html>

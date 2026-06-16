@@ -8,6 +8,7 @@ debugprobe-rs 探針是**通用 CMSIS-DAP SWD 探針**,與目標晶片無關 →
 |---|---|---|---|
 | Raspberry Pi Pico | RP2040 (Cortex-M0+) | `src/bin/uarthello\|uartmon\|uartecho.rs` | ✅ 實機驗證 |
 | WeAct Black Pill | STM32F401CCU6（矽晶實為 401xE/512KB）(Cortex-M4F) | `stm32f401-target/` | ✅ **實機驗證**（2026-06-16）|
+| Nucleo-F446RE | STM32F446RET6 (Cortex-M4F, 512KB/128KB) | `stm32f446-target/` | ✅ **實機驗證**（2026-06-16）；接線/流程見 [`TEST-stm32f446re.md`](TEST-stm32f446re.md) |
 
 ---
 
@@ -86,3 +87,21 @@ probe-rs reset --chip STM32F401CCUx --probe 2e8a:000c-0:E6605838834DA330 --proto
 - **BufferedUart 中斷**:`bind_interrupts!` 綁 `BufferedInterruptHandler<USART1>`(非 `InterruptHandler`)。
 - **memory.x** 由 embassy-stm32 `memory-x` feature 自動產生,**勿** link-rp.x。
 - **I2C 頻率** 在 `i2c::Config.frequency`(非建構子參數)。
+
+---
+
+## Nucleo-F446RE（STM32F446RET6）
+
+完整接線/跳線/OLED 計畫見 **[`TEST-stm32f446re.md`](TEST-stm32f446re.md)**（+ `.html` 向量圖）。
+crate `stm32f446-target/` 鏡像 `stm32f401-target/`,僅差異:embassy-stm32 feature `stm32f446re`、
+LED 改 **PA5**(Nucleo LD2, active-high)、runner/chip `STM32F446RETx`;USART1(PA9/PA10)、I2C1(PB8/PB9) 不變。
+
+**與 Black Pill 最大不同**:Nucleo **有板載 ST-LINK** → **務必先移除 CN2 兩顆跳線**讓外部探針獨佔 SWD
+(否則 ST-LINK 爭線,徵狀同「DP OK / AHB 失敗」)。UART 避開 PA2/PA3(ST-LINK VCP)→ 用 USART1。
+
+**實測（2026-06-16）兩個 Nucleo 專屬眉角**:
+1. 本顆 F446 **帶 RDP Level 1**(Nucleo 少見但確有)→ 先 `stm32f2x unlock 0`(mass erase)+ 拔插上電。
+2. **NRST 與板載 ST-LINK 共線** → 任何走 reset 的燒錄(`probe-rs download`、OpenOCD `program`)都卡在
+   「halt 後 reset timeout」。但**純 `halt` 成功**(DHCSR S_HALT=1)。可靠流程:`halt → flash write_image
+   erase → SYSRESETREQ run`(完整指令見 [`TEST-stm32f446re.md`](TEST-stm32f446re.md) §4b)。
+   若你的 Nucleo NRST 無共線干擾,`probe-rs download --chip STM32F446RETx` 可直接用。

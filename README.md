@@ -3,8 +3,9 @@
 Raspberry Pi **Debug Probe** 韌體的 **Rust / Embassy** 重寫，從原始 C 韌體（`debugprobe/` 子目錄）逐步移植而來。提供 SWD（CMSIS-DAP v2）偵錯器與 USB-to-UART 橋接，可跑在 Debug Probe、Pico、Pico 2 上。
 
 > 進度與分階段清單見 [`TODO.md`](TODO.md)。C 韌體的架構剖析見 [`debugprobe/DEVELOP.md`](debugprobe/DEVELOP.md)。
-> 探針可偵錯/燒錄**非 RP2040 的 SWD 目標**（已實機驗證 STM32F401 "Black Pill"：清 RDP → SWD 燒錄 →
-> LED/OLED/UART 雙向）——接線、解讀保護流程與對等測試韌體見 [`MULTI-TARGET.md`](MULTI-TARGET.md)。
+> 探針可偵錯/燒錄**非 RP2040 的 SWD 目標**（已實機驗證 STM32F401 "Black Pill"；STM32F446RE Nucleo 接線計畫
+> 見 [`TEST-stm32f446re.md`](TEST-stm32f446re.md)）——接線、跳線、解讀保護流程與對等測試韌體見
+> [`MULTI-TARGET.md`](MULTI-TARGET.md)。
 
 ## 功能現況
 

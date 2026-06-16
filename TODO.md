@@ -246,6 +246,13 @@
 - [x] **實機驗證 ✅（2026-06-16）**：清除出廠 RDP Level 1（OpenOCD `stm32f2x unlock`，mass erase）後，
       探針 A 經 `probe-rs download`/`reset` 燒錄成功、LED(PC13) 閃、UART **雙向**皆通。詳見 `MULTI-TARGET.md`
 
+### Nucleo-F446RE（STM32F446RET6, Cortex-M4F, 512KB/128KB）
+- [x] 新增獨立 crate `stm32f446-target/`（鏡像 F401；feature `stm32f446re`、LED PA5、chip `STM32F446RETx`）
+- [x] `cargo build --release` 編譯通過
+- [x] 接線計畫文件 `TEST-stm32f446re.md` / `.html`（接線、跳線插法〔移除 CN2〕、OLED 接法）
+- [x] **實機驗證 ✅（2026-06-16）**：移除 CN2 後，清 RDP Level 1（本顆有）→ 因 NRST 與 ST-LINK 共線，
+      reset-based 燒錄 timeout，改用 OpenOCD `halt + flash write_image + SYSRESETREQ` 燒錄成功、UART **雙向**皆通
+
 ---
 
 ## 關鍵檔案（將新增 / 修改）
