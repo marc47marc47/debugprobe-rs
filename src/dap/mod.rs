@@ -547,6 +547,84 @@ impl<'d> Dap<'d> {
             n -= c;
         }
     }
+
+    // ---------------- 自主目標偵測（供 OLED 顯示 layer 2 晶片型號）----------------
+
+    /// SWD line reset：>=50 個 SWCLK 週期、SWDIO 持高。
+    async fn line_reset(&mut self) {
+        self.probe.write_bits(32, 0xFFFF_FFFF).await;
+        self.probe.write_bits(32, 0xFFFF_FFFF).await; // 共 64 高，足夠
+    }
+
+    /// 經 AHB-AP 讀一個 32-bit 記憶體字（posted read + RDBUFF）。全程 WAIT 重試。
+    async fn read_mem32(&mut self, addr: u32) -> Option<u32> {
+        // AP CSW = 32-bit word、single（probe-rs/openocd 對 STM32 常用值）
+        if self.transfer_retry(0x01, 0x2300_0052).await.0 != ACK_OK {
+            return None;
+        }
+        // AP TAR = addr
+        if self.transfer_retry(0x05, addr).await.0 != ACK_OK {
+            return None;
+        }
+        // AP read DRW（posted，回傳前一筆，丟棄；AHB 讀可能 WAIT → 重試）
+        if self.transfer_retry(0x0F, 0).await.0 != ACK_OK {
+            return None;
+        }
+        // DP RDBUFF 取實際值
+        let (ack, val) = self.transfer_retry(DP_RDBUFF_READ, 0).await;
+        if ack != ACK_OK { None } else { Some(val) }
+    }
+
+    /// host 閒置時自主用 SWD 連線目標，讀 DBGMCU_IDCODE 取 DEV_ID（12-bit）。
+    /// 自包含（含 line reset + JTAG→SWD 切換 + debug powerup + ACK 輪詢）；無目標/失敗回 None。
+    /// 注意：會做 SWD line reset，故僅應在 host **未在使用 DAP** 時呼叫。
+    pub async fn detect_target_devid(&mut self) -> Option<u16> {
+        // line reset → JTAG-to-SWD 切換序列(0xE79E, LSB first) → line reset → idle
+        self.line_reset().await;
+        self.probe.write_bits(16, 0xE79E).await;
+        self.line_reset().await;
+        self.probe.write_bits(8, 0).await; // >=2 idle cycles
+
+        // 讀 DPIDR（DP addr0, RnW）；非 OK 代表沒有 SWD 目標。
+        if self.transfer_retry(0x02, 0).await.0 != ACK_OK {
+            return None;
+        }
+        let _ = self.transfer_retry(0x00, 0x1E).await; // DP ABORT：清 sticky error
+        let _ = self.transfer_retry(0x08, 0).await; // DP SELECT = 0（APSEL0, bank0）
+        let _ = self.transfer_retry(0x04, 0x5000_0000).await; // CTRL/STAT：CSYS/CDBG PWRUPREQ
+
+        // 輪詢 powerup ACK（CDBGPWRUPACK bit29 | CSYSPWRUPACK bit31）後才能存取 AP。
+        let mut powered = false;
+        for _ in 0..20 {
+            let (ack, v) = self.transfer_retry(0x06, 0).await; // DP read CTRL/STAT
+            if ack == ACK_OK && (v & 0xA000_0000) == 0xA000_0000 {
+                powered = true;
+                break;
+            }
+        }
+        if !powered {
+            return None;
+        }
+
+        // DBGMCU_IDCODE @ 0xE0042000（Cortex-M3/M4 STM32 系列）；DEV_ID = bits[11:0]。
+        let v = self.read_mem32(0xE004_2000).await?;
+        let devid = (v & 0xFFF) as u16;
+        if devid == 0 || devid == 0xFFF {
+            None
+        } else {
+            Some(devid)
+        }
+    }
+
+    /// 輕量「在不在」偵測：只做 SWD 喚醒 + 讀 DPIDR（不碰 powerup/AP/記憶體，微秒級）。
+    /// 回 true 代表目標有回應 SWD（用於拔插事件偵測，省去持續完整掃描）。
+    pub async fn target_present(&mut self) -> bool {
+        self.line_reset().await;
+        self.probe.write_bits(16, 0xE79E).await; // JTAG→SWD 切換
+        self.line_reset().await;
+        self.probe.write_bits(8, 0).await; // idle
+        self.transfer_retry(0x02, 0).await.0 == ACK_OK // 讀 DPIDR
+    }
 }
 
 /// 把 NUL 結尾字串寫入 DAP_Info 回應（resp[1]=長度含 NUL）。

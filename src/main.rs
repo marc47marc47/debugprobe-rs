@@ -64,6 +64,9 @@ static EVT_RING: [AtomicU8; EVT_N] = [
 static EVT_SEQ: AtomicU32 = AtomicU32::new(0); // 單調寫入序號（單一寫入者 = dap_task）
 static UART_RX_BYTES: AtomicU32 = AtomicU32::new(0); // 目標→host（client log）
 static UART_TX_BYTES: AtomicU32 = AtomicU32::new(0); // host→目標
+/// layer 2 目標自動偵測結果：0 = 無/未偵測；否則 bit31=有效旗標 | 低 12 位 DEV_ID。
+static TARGET_DEVID: AtomicU32 = AtomicU32::new(0);
+const DEVID_VALID: u32 = 1 << 31;
 
 /// 記錄一筆 DAP 事件（dap_task 單一寫入者）。
 fn record_evt(id: u8) {
@@ -83,6 +86,30 @@ fn evt_name(i: u32) -> &'static str {
     }
 }
 
+/// STM32 DBGMCU DEV_ID（12-bit）→ 晶片型號字串（供 OLED 顯示 layer 2 目標）。
+fn chip_name(devid: u16) -> Option<&'static str> {
+    Some(match devid {
+        0x413 => "STM32F405/407",
+        0x419 => "STM32F42x/43x",
+        0x421 => "STM32F446",
+        0x423 => "STM32F401xBC",
+        0x431 => "STM32F411",
+        0x433 => "STM32F401xDE",
+        0x441 => "STM32F412",
+        0x458 => "STM32F410",
+        0x463 => "STM32F413",
+        0x449 => "STM32F74x/75x",
+        0x450 => "STM32H74x/75x",
+        0x414 => "STM32F1 HD",
+        0x410 => "STM32F1/GD32",
+        0x412 => "STM32F1 LD",
+        0x430 => "STM32F1 XL",
+        0x415 => "STM32L4x6",
+        0x435 => "STM32L43x/44x",
+        _ => return None,
+    })
+}
+
 /// 跑 USB 裝置主迴圈（對應 C 的 usb_thread / tud_task）。
 #[embassy_executor::task]
 async fn usb_task(mut device: UsbDevice<'static, usbdev::ProbeDriver>) {
@@ -93,36 +120,69 @@ async fn usb_task(mut device: UsbDevice<'static, usbdev::ProbeDriver>) {
 /// （對應 C 的 dap_thread + tusb_edpt_handler）。
 #[embassy_executor::task]
 async fn dap_task(mut transport: usbdev::DapTransport, mut dap: dap::Dap<'static>) {
-    use embassy_futures::select::{Either, select};
+    use embassy_futures::select::{Either, Either3, select, select3};
     let mut bulk_req = [0u8; 64];
     let mut hid_req = [0u8; 64];
     let mut resp = [0u8; 64];
+    let mut absent: u32 = 0; // 連續 ping 不到次數（拔除 hysteresis）
 
-    transport.read_ep.wait_enabled().await;
+    const IDLE: Duration = Duration::from_millis(2000);
     loop {
-        // 同時等 v2 bulk OUT 與 v1 HID OUT，任一到達即處理。
-        match select(
-            transport.read_ep.read(&mut bulk_req),
-            transport.hid_reader.read(&mut hid_req),
-        )
-        .await
-        {
-            // CMSIS-DAP v2 (bulk)
-            Either::First(Ok(n)) if n > 0 => {
-                record_evt(bulk_req[0]);
-                let len = dap.execute_command(&bulk_req[..n], &mut resp).await;
-                if len > 0 {
-                    let _ = transport.write_ep.write(&resp[..len]).await;
+        // 先確認 USB DAP 端點已啟用；wait_enabled 為 level 觸發（已啟用即立即返回）。
+        // 期間若逾 2 秒「無 USB host / 未啟用」也會 idle → 仍能自主偵測晶片（不需 USB 連線）。
+        let idle = match select(transport.read_ep.wait_enabled(), Timer::after(IDLE)).await {
+            // USB 已啟用：等 v2 bulk / v1 HID 指令；逾 2 秒閒置則 idle。
+            Either::First(()) => {
+                match select3(
+                    transport.read_ep.read(&mut bulk_req),
+                    transport.hid_reader.read(&mut hid_req),
+                    Timer::after(IDLE),
+                )
+                .await
+                {
+                    Either3::First(Ok(n)) if n > 0 => {
+                        record_evt(bulk_req[0]);
+                        let len = dap.execute_command(&bulk_req[..n], &mut resp).await;
+                        if len > 0 {
+                            let _ = transport.write_ep.write(&resp[..len]).await;
+                        }
+                        false
+                    }
+                    Either3::Second(Ok(_)) => {
+                        record_evt(hid_req[0]);
+                        resp.fill(0);
+                        let _ = dap.execute_command(&hid_req, &mut resp).await;
+                        let _ = transport.hid_writer.write(&resp).await;
+                        false
+                    }
+                    Either3::Third(()) => true, // host 已連線但閒置
+                    _ => false,
                 }
             }
-            // CMSIS-DAP v1 (HID)：報告固定 64 bytes
-            Either::Second(Ok(_)) => {
-                record_evt(hid_req[0]);
-                resp.fill(0);
-                let _ = dap.execute_command(&hid_req, &mut resp).await;
-                let _ = transport.hid_writer.write(&resp).await;
+            // 未啟用（無 USB host）且逾時 → idle。
+            Either::Second(()) => true,
+        };
+
+        // 閒置（含完全無 USB 連線）：改用「拔插」事件驅動，避免持續做完整 SWD 掃描。
+        // 先用 SWDIO 電位（不發 SWD、不干擾目標）判斷是否連接；只有在「連接狀態改變」
+        // 或「已連接但尚未成功讀到型號」時，才做一次完整 SWD 掃描。狀態不變則維持顯示。
+        if idle {
+            if dap.target_present().await {
+                // 有回應：reset 拔除計數。剛插入 / 尚未成功讀到型號才做一次完整掃描；
+                // 已知型號就維持顯示，不再發完整掃描（只剩上面的輕量 ping）。
+                absent = 0;
+                if TARGET_DEVID.load(Ordering::Relaxed) & DEVID_VALID == 0 {
+                    if let Some(id) = dap.detect_target_devid().await {
+                        TARGET_DEVID.store(DEVID_VALID | id as u32, Ordering::Relaxed);
+                    }
+                }
+            } else {
+                // 連續 2 次 ping 不到才視為拔除（hysteresis 防單次漏讀閃爍）。
+                absent += 1;
+                if absent >= 2 {
+                    TARGET_DEVID.store(0, Ordering::Relaxed);
+                }
             }
-            _ => {}
         }
     }
 }
@@ -134,6 +194,22 @@ async fn oled_task(mut dbg: display::DebugOled, mut led: Output<'static>) {
         led.toggle();
         let mut l_ver: heapless::String<21> = heapless::String::new();
         let _ = write!(l_ver, "debugprobe-rs {}", env!("CARGO_PKG_VERSION"));
+        // 第 2 行：自動偵測的 layer 2 晶片型號（dap_task 閒置時更新）。
+        let mut l_chip: heapless::String<21> = heapless::String::new();
+        let dv = TARGET_DEVID.load(Ordering::Relaxed);
+        if dv & DEVID_VALID != 0 {
+            let id = (dv & 0xFFF) as u16;
+            match chip_name(id) {
+                Some(n) => {
+                    let _ = write!(l_chip, "{}", n);
+                }
+                None => {
+                    let _ = write!(l_chip, "chip 0x{:03X}", id);
+                }
+            }
+        } else {
+            let _ = write!(l_chip, "no target");
+        }
         let mut l_uart: heapless::String<21> = heapless::String::new();
         let _ = write!(
             l_uart,
@@ -143,9 +219,9 @@ async fn oled_task(mut dbg: display::DebugOled, mut led: Output<'static>) {
         );
         dbg.status(&[
             l_ver.as_str(),
+            l_chip.as_str(),
             evt_name(0),
             evt_name(1),
-            evt_name(2),
             l_uart.as_str(),
         ]);
         Timer::after(Duration::from_millis(3000)).await;
