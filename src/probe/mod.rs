@@ -22,6 +22,7 @@ use embassy_rp::Peri;
 use embassy_rp::clocks::clk_sys_freq;
 use embassy_rp::gpio::{Drive, Flex, Level, Pull, SlewRate};
 use embassy_rp::peripherals::PIO0;
+use embassy_time::Timer;
 use embassy_rp::pio::{
     Common, Config, Direction, LoadedProgram, Pin, ShiftConfig, ShiftDirection, StateMachine,
 };
@@ -191,6 +192,11 @@ impl<'d> Probe<'d> {
         self.cached_freq_khz = freq_khz;
     }
 
+    /// 目前 SWCLK 設定頻率（kHz）。
+    pub fn freq_khz(&self) -> u32 {
+        self.cached_freq_khz
+    }
+
     fn fmt_cmd(&self, bit_count: u32, out_en: bool, cmd: Cmd) -> u32 {
         let addr = match cmd {
             Cmd::Write => self.addrs.write,
@@ -268,6 +274,42 @@ impl<'d> Probe<'d> {
             Some(r) => (r.get_level() == Level::High) as u8,
             None => 0,
         }
+    }
+
+    /// 偵測 SWDIO / SWCLK 兩條線是否實體連到「有電有地」的目標。
+    /// 方法：drive 反向 → 釋放(輸入,無 pull) → 等目標內部 pull 翻轉 → 讀電位。
+    /// ARM 目標 SWDIO 內部上拉、SWCLK 內部下拉；連通則被翻向 pull 側、未接則維持驅動值。
+    /// 回 (dio_connected, clk_connected)。僅在 host 閒置時呼叫；之後的 swd_health 會重置腳位。
+    pub async fn probe_lines(&mut self) -> (bool, bool) {
+        // 暫停 SM：否則 SWCLK 為 sideset 腳，SM idle 的 `pull side 0` 會持續把它驅動低，
+        // 導致釋放後永遠讀到 LOW（永遠誤判連通）。停 SM 後 sideset 不再驅動。
+        self.sm.set_enable(false);
+
+        // --- SWDIO：drive LOW → 釋放 → 連通(上拉)→HIGH ---
+        self.sm.set_pin_dirs(Direction::Out, &[&self._swdio]);
+        self.sm.set_pins(Level::Low, &[&self._swdio]);
+        Timer::after_micros(20).await;
+        self._swdio.set_pull(Pull::None);
+        self.sm.set_pin_dirs(Direction::In, &[&self._swdio]);
+        Timer::after_micros(150).await;
+        let dio = (embassy_rp::pac::SIO.gpio_in(0).read() >> crate::board::PIN_SWDIO) & 1 != 0;
+        self._swdio.set_pull(Pull::Up); // 還原（idle 高）
+        self.sm.set_pin_dirs(Direction::Out, &[&self._swdio]);
+
+        // --- SWCLK：drive HIGH → 釋放 → 連通(下拉)→LOW ---
+        self.sm.set_pin_dirs(Direction::Out, &[&self._swclk]);
+        self.sm.set_pins(Level::High, &[&self._swclk]);
+        Timer::after_micros(20).await;
+        self._swclk.set_pull(Pull::None);
+        self.sm.set_pin_dirs(Direction::In, &[&self._swclk]);
+        Timer::after_micros(150).await;
+        let clk = (embassy_rp::pac::SIO.gpio_in(0).read() >> crate::board::PIN_SWCLK) & 1 == 0;
+        self.sm.set_pin_dirs(Direction::Out, &[&self._swclk]);
+        self.sm.set_pins(Level::Low, &[&self._swclk]); // 還原（idle 低）
+
+        // 重新啟用 SM（PC 維持在 get_next_cmd 等 pull；下次 swd_health 正常運作）。
+        self.sm.set_enable(true);
+        (dio, clk)
     }
 
     /// 停用 SM（對應 C `probe_deinit` 的主要動作；程式保留載入）。

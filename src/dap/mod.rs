@@ -82,6 +82,51 @@ pub fn cmd_name(id: u8) -> &'static str {
     }
 }
 
+/// 自動偵測到的目標資訊（供 OLED 顯示）。
+pub struct TargetInfo {
+    /// CoreSight ROM table 的 JEP106 廠商碼（cc<<7|id）；0=未知。跨廠牌辨識用。
+    pub designer: u16,
+    /// ST DBGMCU DEV_ID（僅 ST/GD32 有效，否則 0）。
+    pub devid: u16,
+    /// 廠商專屬 part（目前用於 Nordic FICR.INFO.PART，如 0x52832）；0=無。
+    pub part: u32,
+    /// 讀保護等級：0=L0(可燒)、1=L1(需 unlock)、2=L2(鎖死)、0xFF=未知。
+    pub rdp: u8,
+}
+
+/// 常見 JEP106 廠商碼（cc<<7 | 7-bit id）。
+pub const JEP_ST: u16 = 0x020; // STMicroelectronics（GD32 亦複製此 ROM table 廠商碼）
+pub const JEP_NORDIC: u16 = 0x244; // Nordic Semiconductor
+pub const JEP_RASPI: u16 = 0x493; // Raspberry Pi
+
+/// 讀保護（RDP）所在的 option 暫存器家族。各家族暫存器位址/格式不同。
+enum RdpReg {
+    /// F2/F4/F7：FLASH_OPTCR @ 0x40023C14，RDP=bits[15:8]（0xAA=L0, 0xCC=L2, 其他=L1）。
+    Optcr,
+    /// F0/F1/F3/GD32F1：FLASH_OBR @ 0x4002201C，bit1 RDPRT（1=保護=L1, 0=L0）。
+    Obr,
+    /// L4/G0/G4：FLASH_OPTR @ 0x40022020，RDP=bits[7:0]（0xAA=L0, 0xCC=L2, 其他=L1）。
+    Optr,
+    /// 其他家族（H7/L0/L1/L5/U5/WB/WL/C0…）暫存器各異 → 不解讀，顯示 unknown。
+    Unknown,
+}
+
+/// 依 DBGMCU DEV_ID 判斷 RDP 暫存器家族。
+fn rdp_reg(devid: u16) -> RdpReg {
+    match devid {
+        // F2 / F4 / F7
+        0x411 | 0x413 | 0x419 | 0x421 | 0x423 | 0x431 | 0x433 | 0x434 | 0x441 | 0x449 | 0x451
+        | 0x452 | 0x458 | 0x463 => RdpReg::Optcr,
+        // F0 / F1 / F3 / GD32F1
+        0x410 | 0x412 | 0x414 | 0x418 | 0x420 | 0x428 | 0x430 | 0x440 | 0x442 | 0x444 | 0x445
+        | 0x448 | 0x422 | 0x432 | 0x438 | 0x439 | 0x446 => RdpReg::Obr,
+        // L4 / G0 / G4
+        0x415 | 0x435 | 0x461 | 0x462 | 0x464 | 0x470 | 0x471 | 0x456 | 0x460 | 0x466 | 0x467
+        | 0x468 | 0x469 | 0x479 => RdpReg::Optr,
+        _ => RdpReg::Unknown,
+    }
+}
+
 fn u32_le(b: &[u8]) -> u32 {
     u32::from_le_bytes([b[0], b[1], b[2], b[3]])
 }
@@ -578,7 +623,7 @@ impl<'d> Dap<'d> {
     /// host 閒置時自主用 SWD 連線目標，讀 DBGMCU_IDCODE 取 DEV_ID（12-bit）。
     /// 自包含（含 line reset + JTAG→SWD 切換 + debug powerup + ACK 輪詢）；無目標/失敗回 None。
     /// 注意：會做 SWD line reset，故僅應在 host **未在使用 DAP** 時呼叫。
-    pub async fn detect_target_devid(&mut self) -> Option<u16> {
+    pub async fn detect_target(&mut self) -> Option<TargetInfo> {
         // line reset → JTAG-to-SWD 切換序列(0xE79E, LSB first) → line reset → idle
         self.line_reset().await;
         self.probe.write_bits(16, 0xE79E).await;
@@ -606,24 +651,128 @@ impl<'d> Dap<'d> {
             return None;
         }
 
-        // DBGMCU_IDCODE @ 0xE0042000（Cortex-M3/M4 STM32 系列）；DEV_ID = bits[11:0]。
-        let v = self.read_mem32(0xE004_2000).await?;
-        let devid = (v & 0xFFF) as u16;
-        if devid == 0 || devid == 0xFFF {
-            None
-        } else {
-            Some(devid)
+        // 跨廠牌辨識：先讀 CoreSight ROM table 的 JEP106 廠商碼（@0xE00FF000）。
+        let designer = self.read_designer().await;
+        let mut devid = 0u16;
+        let mut part = 0u32;
+        let mut rdp = 0xFFu8;
+
+        if designer == JEP_ST || designer == 0 {
+            // ST / GD32：DBGMCU_IDCODE @ 0xE0042000，DEV_ID = bits[11:0]，再讀 RDP。
+            if let Some(v) = self.read_mem32(0xE004_2000).await {
+                let d = (v & 0xFFF) as u16;
+                if d != 0 && d != 0xFFF {
+                    devid = d;
+                    rdp = self.read_rdp(d).await;
+                }
+            }
+        } else if designer == JEP_NORDIC {
+            // Nordic：FICR.INFO.PART @ 0x10000100（如 0x52832）。
+            part = self.read_mem32(0x1000_0100).await.unwrap_or(0);
+        }
+
+        // 已通過 DPIDR+powerup，目標確實存在；即使廠商/型號未知也回報（讓 OLED 顯示廠商或 chip?）。
+        Some(TargetInfo {
+            designer,
+            devid,
+            part,
+            rdp,
+        })
+    }
+
+    /// 讀 CoreSight ROM table(0xE00FF000) 的 PIDR，取 JEP106 廠商碼（cc<<7|id）；失敗回 0。
+    async fn read_designer(&mut self) -> u16 {
+        let p1 = self.read_mem32(0xE00F_FFE4).await; // PIDR1
+        let p2 = self.read_mem32(0xE00F_FFE8).await; // PIDR2
+        let p4 = self.read_mem32(0xE00F_FFD0).await; // PIDR4
+        match (p1, p2, p4) {
+            (Some(p1), Some(p2), Some(p4)) => {
+                let id = ((p2 & 0x7) << 4) | ((p1 >> 4) & 0xF); // 7-bit JEP106 id
+                let cc = p4 & 0xF; // continuation count
+                (((cc << 7) | id) & 0x7FF) as u16
+            }
+            _ => 0,
         }
     }
 
-    /// 輕量「在不在」偵測：只做 SWD 喚醒 + 讀 DPIDR（不碰 powerup/AP/記憶體，微秒級）。
-    /// 回 true 代表目標有回應 SWD（用於拔插事件偵測，省去持續完整掃描）。
-    pub async fn target_present(&mut self) -> bool {
+    /// 依 ST DEV_ID 讀 RDP 讀保護等級（0=L0, 1=L1, 2=L2, 0xFF=未知/不支援該家族）。
+    async fn read_rdp(&mut self, devid: u16) -> u8 {
+        match rdp_reg(devid) {
+            RdpReg::Optcr => match self.read_mem32(0x4002_3C14).await {
+                Some(v) => match (v >> 8) & 0xFF {
+                    0xAA => 0,
+                    0xCC => 2,
+                    _ => 1,
+                },
+                None => 0xFF,
+            },
+            RdpReg::Obr => match self.read_mem32(0x4002_201C).await {
+                Some(v) => {
+                    if v & 0x2 != 0 {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                None => 0xFF,
+            },
+            RdpReg::Optr => match self.read_mem32(0x4002_2020).await {
+                Some(v) => match v & 0xFF {
+                    0xAA => 0,
+                    0xCC => 2,
+                    _ => 1,
+                },
+                None => 0xFF,
+            },
+            RdpReg::Unknown => 0xFF,
+        }
+    }
+
+    /// SWD 訊號品質 0..100：喚醒後連讀 DPIDR N 次，回「乾淨(ACK_OK 且 parity 正確)」比例。
+    /// 0 = 沒回應（沒接/嚴重不良）。兼作「在不在」偵測（>0 即 present）。
+    /// 純 DP 讀（不碰 powerup/AP/CPU），主要量測 SWDIO 讀取鏈路的訊號完整性。
+    pub async fn swd_health(&mut self) -> u8 {
+        // 喚醒：line reset → JTAG→SWD 切換 → line reset → idle。
         self.line_reset().await;
-        self.probe.write_bits(16, 0xE79E).await; // JTAG→SWD 切換
+        self.probe.write_bits(16, 0xE79E).await;
         self.line_reset().await;
-        self.probe.write_bits(8, 0).await; // idle
-        self.transfer_retry(0x02, 0).await.0 == ACK_OK // 讀 DPIDR
+        self.probe.write_bits(8, 0).await;
+        const N: u32 = 32;
+        let mut clean = 0u32;
+        for _ in 0..N {
+            // swd_transfer 讀 DPIDR：parity 失敗回 ACK_ERROR，故 ACK_OK = 乾淨。
+            if self.swd_transfer(0x02, 0).await.0 == ACK_OK {
+                clean += 1;
+            }
+        }
+        (clean * 100 / N) as u8
+    }
+
+    /// 偵測 DIO / CLK 兩條線實體連通狀態（不發 SWD，看目標內部 pull）。回 (dio, clk)。
+    pub async fn probe_lines(&mut self) -> (bool, bool) {
+        self.probe.probe_lines().await
+    }
+
+    /// SWD 喚醒序列（line reset → JTAG→SWD 切換 → line reset → idle），不讀任何暫存器。
+    pub async fn swd_wakeup(&mut self) {
+        self.line_reset().await;
+        self.probe.write_bits(16, 0xE79E).await;
+        self.line_reset().await;
+        self.probe.write_bits(8, 0).await;
+    }
+
+    /// 讀一次 DPIDR（DP addr0）；回 true = ACK_OK（兼作在不在偵測 + 邏輯擷取的訊號刺激）。
+    pub async fn swd_read_dpidr(&mut self) -> bool {
+        self.swd_transfer(0x02, 0).await.0 == ACK_OK
+    }
+
+    /// 設定 SWCLK 頻率（kHz）。
+    pub fn set_swclk_khz(&mut self, khz: u32) {
+        self.probe.set_swclk_freq(khz);
+    }
+    /// 目前 SWCLK 頻率（kHz）。
+    pub fn swclk_khz(&self) -> u32 {
+        self.probe.freq_khz()
     }
 }
 

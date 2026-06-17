@@ -9,3 +9,5 @@
 # 測試暫存
 /comout.txt
 /*.ps1
+# OLED 實機照片等暫存輸出
+/out/

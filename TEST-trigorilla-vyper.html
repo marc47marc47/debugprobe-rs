@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>接線計畫：Anycubic Vyper TriGorilla+ v0.0.6 作為 layer 2</title>
+<style>
+  body { font-family: "Segoe UI", "Microsoft JhengHei", system-ui, sans-serif;
+         max-width: 1000px; margin: 24px auto; padding: 0 16px; color: #1c1e21; line-height: 1.6; }
+  h1 { border-bottom: 3px solid #c0392b; padding-bottom: 6px; }
+  h2 { margin-top: 30px; border-left: 5px solid #c0392b; padding-left: 10px; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+  th, td { border: 1px solid #ccd; padding: 6px 10px; text-align: left; font-size: 14px; }
+  th { background: #fdeeec; }
+  code { background: #f3f4f6; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  pre { background: #1e1e1e; color: #d4d4d4; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 13px; }
+  .danger { background:#fdecea; border-left:5px solid #c0392b; padding:10px 14px; border-radius:4px; }
+  .warn { background:#fff6e5; border-left:5px solid #e9a100; padding:10px 14px; border-radius:4px; }
+  .pill { display:inline-block; background:#e9a100; color:#fff; border-radius:12px; padding:1px 10px; font-size:13px; }
+  figcaption { color:#667; font-size:13px; margin-top:4px; }
+  .sw { color:#c33; } .ua { color:#27a; } .pw { color:#777; } .no { color:#c0392b; }
+</style>
+</head>
+<body>
+
+<h1>接線計畫：Anycubic Vyper / TriGorilla+ v0.0.6 → layer 2</h1>
+<p><span class="pill">接線計畫 + 焊點定位指南（尚未實機）</span>
+用 debugprobe-rs 探針對 Anycubic Vyper 主板（<b>GD32F103RET6</b>, Cortex-M3）做 SWD layer 2。
+純文字版見 <a href="TEST-trigorilla-vyper.md">TEST-trigorilla-vyper.md</a>。</p>
+
+<div class="danger">
+<b>⚠️ 這是實體 3D 印表機主板,不是開發板。</b>
+燒錄會覆蓋 Anycubic 原廠韌體;若 RDP 開啟,清除會 <b>mass erase 連 SD bootloader 一起清掉</b>（之後 SD 卡更新失效,只能 SWD 刷回完整韌體）。
+測試時請<b>關 24V 電源、只用 USB 供電</b>（或拔掉加熱器/馬達），避免誤觸加熱/馬達腳。<b>動手前先備好可恢復的完整韌體。</b>
+</div>
+
+<h2>SWD 接線圖</h2>
+<figure>
+<svg viewBox="0 0 900 330" xmlns="http://www.w3.org/2000/svg" font-family="Consolas, monospace" font-size="13">
+  <defs>
+    <marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#333"/></marker>
+  </defs>
+
+  <rect x="30" y="60" width="240" height="200" rx="8" fill="#f6fbf8" stroke="#2a7" stroke-width="2"/>
+  <text x="150" y="84" text-anchor="middle" font-weight="bold">Probe A（Pico）</text>
+  <text x="150" y="102" text-anchor="middle" fill="#557">debugprobe-rs</text>
+  <text x="48" y="138" class="sw">GP2  SWCLK</text>
+  <text x="48" y="166" class="sw">GP3  SWDIO</text>
+  <text x="48" y="194" class="sw">GP1  nRESET</text>
+  <text x="48" y="222" class="pw">GND</text>
+
+  <rect x="610" y="60" width="260" height="230" rx="8" fill="#fdeeec" stroke="#c0392b" stroke-width="2"/>
+  <text x="740" y="84" text-anchor="middle" font-weight="bold">TriGorilla+ v0.0.6</text>
+  <text x="740" y="102" text-anchor="middle" fill="#557">GD32F103RET6（Cortex-M3）</text>
+  <text x="740" y="120" text-anchor="middle" fill="#889">印表機自身 USB/24V 供電</text>
+  <text x="724" y="138" class="sw">PA14 SWCLK</text>
+  <text x="724" y="166" class="sw">PA13 SWDIO</text>
+  <text x="724" y="194" class="sw">NRST</text>
+  <text x="724" y="222" class="pw">GND</text>
+  <text x="724" y="252" class="no">3V3 ← 不要接！</text>
+
+  <line x1="170" y1="134" x2="720" y2="134" stroke="#c33" stroke-width="2" marker-end="url(#ar)"/>
+  <line x1="170" y1="162" x2="720" y2="162" stroke="#c33" stroke-width="2" marker-end="url(#ar)"/>
+  <line x1="720" y1="162" x2="172" y2="162" stroke="#c33" stroke-width="2" marker-end="url(#ar)"/>
+  <line x1="175" y1="190" x2="720" y2="190" stroke="#c33" stroke-width="2" marker-end="url(#ar)"/>
+  <line x1="120" y1="218" x2="720" y2="218" stroke="#999" stroke-width="2" stroke-dasharray="4 3"/>
+
+  <rect x="305" y="270" width="290" height="46" rx="6" fill="#fafafa" stroke="#ddd"/>
+  <text x="319" y="290"><tspan class="sw">━ SWD</tspan>　<tspan class="pw">┄ GND（必接）</tspan>　<tspan class="no">3V3 不接</tspan></text>
+  <text x="319" y="308" fill="#667">板子用自身電源,探針只共地;雙箭頭=SWDIO 雙向</text>
+</svg>
+<figcaption>只接 SWDIO/SWCLK/NRST/GND;<b>嚴禁接 3V3/5V</b>（反灌電會燒板）。板子用印表機自身電源。</figcaption>
+</figure>
+
+<h2>如何定位 SWD 焊點（公開資料未記載）</h2>
+<div class="warn">
+TriGorilla+ v0.0.6 的 SWD 焊點位置 <b>Anycubic 官方與社群皆未公開</b>（Vyper 平常走 SD 卡 bootloader,少用 SWD）。
+PA13/PA14 是 GD32F103 固定的 SWD 腳,需自己在板上定位。
+</div>
+<ol>
+  <li><b>找測試焊點群</b>：GD32 旁/SD 卡座/CH340 附近常有一排沒接元件的小焊點或 via。</li>
+  <li><b>萬用表連通量測（最可靠）</b>：斷電下,從 GD32 的 <code>PA13≈pin46</code>、<code>PA14≈pin49</code>（LQFP64,以 datasheet 為準）逐點測附近焊點,嗶聲即對應訊號。</li>
+  <li><b>直接焊飛線到晶片腳</b>（最後手段）。</li>
+</ol>
+<p style="font-size:13px;color:#667">找到後拍照標記;先量 3V3 焊點確認 ~3.3V、確認 GND。</p>
+
+<h2>後續流程（實機階段,待另行授權）</h2>
+<pre># 1. 非破壞性連線（確認認得 GD32、檢查 RDP）
+probe-rs info --chip STM32F103RETx --probe 2e8a:000c-0:E6605838834DA330 --protocol swd --speed 1000
+# 2. 若 RDP=0 → 先備份原廠 flash（openocd dump_image）
+# 3. 若要燒（RDP=1 需 openocd stm32f1x unlock 0，會 mass erase）→ 再燒測試韌體
+#    UART 橋接測試建議用 USART1 PA2/PA3（WiFi 排針）;勿用接 LCD 的 PB10/PB11</pre>
+
+<p style="color:#778;font-size:13px;margin-top:28px">
+來源：
+<a href="https://pasha4ur.org.ua/articles/anycubic-vyper-overviews-guides-adjustments-settings-tips-modifications-upgrades-and-custom-firmwares/4">pasha4ur</a> ·
+<a href="https://anycubic-vyper-doc.readthedocs.io/en/latest/hardware/components/trigorilla_v006_mainboard.html">anycubic-vyper-doc</a> ·
+<a href="https://sean-dearing.gitbook.io/klipper-installation-for-anycubic-vyper/klipper-firmware/klipper-firmware-flashing">Klipper Vyper</a> ·
+<a href="https://github.com/SXHXC/Marlin-Anycubic-Predator-Trigorilla-PRO">Marlin Predator TriGorilla Pro</a>
+</p>
+
+</body>
+</html>
