@@ -611,7 +611,8 @@ async fn oled_task(mut dbg: display::DebugOled, mut led: Output<'static>) {
         // 第 2 行：可燒錄狀態（RDP）+ 頻率(append)；無目標則顯示探測頻率。
         let mut l_flash: heapless::String<21> = heapless::String::new();
         if valid {
-            let _ = write!(l_flash, "{} {}k", TARGET.rdp().label(), TARGET.used_khz());
+            // 短標 + 頻率，控制在 x<82 不撞右側柱狀圖（如 "RDP0 1000k"）。
+            let _ = write!(l_flash, "{} {}k", TARGET.rdp().short(), TARGET.used_khz());
         } else {
             let _ = write!(l_flash, "probe {}k", TARGET.probe_khz());
         }

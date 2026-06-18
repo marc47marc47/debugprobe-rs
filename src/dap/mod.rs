@@ -191,6 +191,15 @@ impl RdpLevel {
             RdpLevel::Unknown => "flash unknown",
         }
     }
+    /// 短標（左側面板有限寬度用，不撞右側柱狀圖）。
+    pub fn short(self) -> &'static str {
+        match self {
+            RdpLevel::Open => "RDP0",
+            RdpLevel::Level1 => "RDP1",
+            RdpLevel::Level2 => "RDP2",
+            RdpLevel::Unknown => "RDP?",
+        }
+    }
 }
 
 /// 連線品質量測結果（OLED 訊號儀）：每輪 16 次讀取中成功的次數。
