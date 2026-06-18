@@ -78,6 +78,8 @@ struct TargetShared {
     /// JEP106 廠商碼 + 廠商專屬 part（Nordic FICR 等）。
     designer: AtomicU32,
     part: AtomicU32,
+    /// CPUID PARTNO（Cortex-M 核心型號）；0=未知。
+    core: AtomicU32,
     /// 自適應偵測實際採用的 SWCLK（kHz）；0 = 沒讀到。
     used_khz: AtomicU32,
     /// 連線品質訊號儀：每輪 16 次讀取成功數（DP 短交易 / AP AHB 長交易）。
@@ -93,6 +95,7 @@ impl TargetShared {
             flash: AtomicU8::new(0xFF),
             designer: AtomicU32::new(0),
             part: AtomicU32::new(0),
+            core: AtomicU32::new(0),
             used_khz: AtomicU32::new(0),
             link_dp: AtomicU32::new(0),
             link_ap: AtomicU32::new(0),
@@ -102,6 +105,7 @@ impl TargetShared {
     fn store(&self, info: &dap::TargetInfo) {
         self.designer.store(info.designer as u32, Ordering::Relaxed);
         self.part.store(info.part, Ordering::Relaxed);
+        self.core.store(info.core as u32, Ordering::Relaxed);
         self.flash.store(info.rdp.to_u8(), Ordering::Relaxed);
         self.devid
             .store(Self::VALID | info.devid as u32, Ordering::Relaxed);
@@ -122,6 +126,9 @@ impl TargetShared {
     }
     fn part(&self) -> u32 {
         self.part.load(Ordering::Relaxed)
+    }
+    fn core(&self) -> u16 {
+        self.core.load(Ordering::Relaxed) as u16
     }
     fn rdp(&self) -> dap::RdpLevel {
         dap::RdpLevel::from_u8(self.flash.load(Ordering::Relaxed))
@@ -307,9 +314,27 @@ static VENDOR_NAMES: &[(u16, &str)] = &[
     (0x01F, "Microchip"),
 ];
 
+/// CPUID PARTNO → Cortex-M 核心名（通用辨識：任何 ARM Cortex-M 目標的後援顯示）。
+static CORE_NAMES: &[(u16, &str)] = &[
+    (0xC20, "Cortex-M0"),
+    (0xC60, "Cortex-M0+"),
+    (0xC21, "Cortex-M1"),
+    (0xC23, "Cortex-M3"),
+    (0xC24, "Cortex-M4"),
+    (0xC27, "Cortex-M7"),
+    (0xD20, "Cortex-M23"),
+    (0xD21, "Cortex-M33"),
+    (0xD22, "Cortex-M55"),
+    (0xD23, "Cortex-M85"),
+];
+
 /// 在 `(key, name)` 查表中線性搜尋。
 fn lookup(table: &[(u16, &'static str)], key: u16) -> Option<&'static str> {
     table.iter().find(|&&(k, _)| k == key).map(|&(_, name)| name)
+}
+
+fn core_name(part: u16) -> Option<&'static str> {
+    lookup(CORE_NAMES, part)
 }
 
 fn chip_name(devid: u16) -> Option<&'static str> {
@@ -413,7 +438,7 @@ async fn adaptive_sweep(dap: &mut dap::Dap<'static>, sticky: &mut u32) -> u32 {
     if dap.swd_read_dpidr().await || dap.swd_select_rp().await {
         return *sticky;
     }
-    for &khz in &[1000u32, 500, 250, 100] {
+    for &khz in &[1000u32, 500, 250, 100, 50, 20] {
         dap.set_swclk_khz(khz);
         dap.swd_wakeup().await;
         if dap.swd_read_dpidr().await || dap.swd_select_rp().await {
@@ -481,8 +506,10 @@ async fn oled_task(mut dbg: display::DebugOled, mut led: Output<'static>) {
             let id = TARGET.devid();
             let designer = TARGET.designer();
             let part = TARGET.part();
+            let core = TARGET.core();
+            // 顯示優先序：精確型號 → nRF → 廠商+核心 → 核心 → 廠商 → DP/core 後援。
             if id != 0 {
-                // ST / GD32：精確型號
+                // ST / GD32：精確型號（查表中則型號，否則 DEV_ID）。
                 match chip_name(id) {
                     Some(n) => {
                         let _ = write!(l_chip, "{}", n);
@@ -495,15 +522,14 @@ async fn oled_task(mut dbg: display::DebugOled, mut led: Output<'static>) {
                 // Nordic nRF（FICR part 如 0x52832）
                 let _ = write!(l_chip, "nRF{:X}", part);
             } else {
-                // 其他廠牌：至少顯示廠商名
-                match vendor_name(designer) {
-                    Some(v) => {
-                        let _ = write!(l_chip, "{}", v);
-                    }
-                    None => {
-                        let _ = write!(l_chip, "vendor 0x{:03X}", designer);
-                    }
-                }
+                // 未知型號：盡量顯示「廠商 + 核心」（A：CPUID 通用核心後援）。
+                let _ = match (vendor_name(designer), core_name(core)) {
+                    (Some(v), Some(c)) => write!(l_chip, "{} {}", v, c),
+                    (None, Some(c)) => write!(l_chip, "{}", c),
+                    (Some(v), None) => write!(l_chip, "{}", v),
+                    (None, None) if core != 0 => write!(l_chip, "core 0x{:03X}", core),
+                    (None, None) => write!(l_chip, "vendor 0x{:03X}", designer),
+                };
             }
         } else {
             let _ = write!(l_chip, "no target");

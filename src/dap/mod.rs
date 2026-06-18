@@ -211,6 +211,9 @@ pub struct TargetInfo {
     pub part: u32,
     /// 讀保護等級。
     pub rdp: RdpLevel,
+    /// CPUID PARTNO（Cortex-M 核心：0xC20=M0,0xC60=M0+,0xC23=M3,0xC24=M4,0xC27=M7,
+    /// 0xD20=M23,0xD21=M33…）；0=未知。通用核心辨識用。
+    pub core: u16,
 }
 
 /// 常見 JEP106 廠商碼（cc<<7 | 7-bit id）。
@@ -218,9 +221,14 @@ pub const JEP_ST: u16 = 0x020; // STMicroelectronics（GD32 亦複製此 ROM tab
 pub const JEP_NORDIC: u16 = 0x244; // Nordic Semiconductor
 pub const JEP_RASPI: u16 = 0x493; // Raspberry Pi
 
-/// RP2040 multidrop SWD TARGETSEL（core0）：TINSTANCE=0 | TARGETID=0x01002927。
-/// （core1 = 0x11002927；RP2350 的 TARGETID 不同，本版先支援 RP2040。）
-const TARGETSEL_RP_CORE0: u32 = 0x0100_2927;
+/// multidrop SWD TARGETSEL 候選（TINSTANCE<<28 | TARGETID）。aggressive：逐一試到通為止。
+/// RP2040 確定值；RP2350 為 best-effort（值不符只是 no-ack 失敗、無害，待實機確認）。
+const MULTIDROP_TARGETSEL: [u32; 4] = [
+    0x0100_2927, // RP2040 core0
+    0x1100_2927, // RP2040 core1
+    0x0004_0927, // RP2350 core0（best-effort）
+    0x1004_0927, // RP2350 core1（best-effort）
+];
 
 /// 讀保護（RDP）所在的 option 暫存器家族。各家族暫存器位址/格式不同。
 enum RdpReg {
@@ -755,15 +763,47 @@ impl<'d> Dap<'d> {
         self.idle().await;
     }
 
-    /// 嘗試 RP2040/RP2350 multidrop 選核心：dormant→SWD + line reset + TARGETSEL(core0) + 讀 DPIDR。
-    /// 成功（讀到 DPIDR）回 true。供單一 DP 無回應時自動改試 multidrop 目標。
+    /// 嘗試 RP2040/RP2350 multidrop 選核心（C：逐一試多個 TARGETSEL）：
+    /// 每個候選做 dormant→SWD + line reset + TARGETSEL + 讀 DPIDR；任一成功回 true。
     pub async fn swd_select_rp(&mut self) -> bool {
+        for &id in &MULTIDROP_TARGETSEL {
+            self.line_reset().await;
+            self.swd_dormant_to_swd().await;
+            self.line_reset().await;
+            self.probe.write_bits(8, 0).await; // >=2 idle
+            self.swd_write_targetsel(id).await;
+            if self.swd_read_dpidr().await {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 多重喚醒（B）：依序試 (1) JTAG→SWD 切換序列、(2) dormant→SWD 選擇警示序列，
+    /// 各自接 line reset + 讀 DPIDR。任一讀到 DPIDR 回 true（單一 DP 目標）。
+    async fn swd_connect(&mut self) -> bool {
+        // (1) JTAG-to-SWD 切換（0xE79E）
+        self.line_reset().await;
+        self.probe.write_bits(16, 0xE79E).await;
+        self.line_reset().await;
+        self.probe.write_bits(8, 0).await;
+        if self.swd_read_dpidr().await {
+            return true;
+        }
+        // (2) dormant→SWD（部分晶片開機在 dormant 態）
         self.line_reset().await;
         self.swd_dormant_to_swd().await;
         self.line_reset().await;
-        self.probe.write_bits(8, 0).await; // >=2 idle
-        self.swd_write_targetsel(TARGETSEL_RP_CORE0).await;
+        self.probe.write_bits(8, 0).await;
         self.swd_read_dpidr().await
+    }
+
+    /// 讀 CPUID(0xE000ED00) 的 PARTNO(bits[15:4])（A：通用 Cortex-M 核心辨識）；失敗回 0。
+    async fn read_cpuid_part(&mut self) -> u16 {
+        match self.read_mem32(0xE000_ED00).await {
+            Some(v) => ((v >> 4) & 0xFFF) as u16,
+            None => 0,
+        }
     }
 
     /// 經 AHB-AP 讀一個 32-bit 記憶體字（posted read + RDBUFF）。全程 WAIT 重試。
@@ -789,15 +829,9 @@ impl<'d> Dap<'d> {
     /// 自包含（含 line reset + JTAG→SWD 切換 + debug powerup + ACK 輪詢）；無目標/失敗回 None。
     /// 注意：會做 SWD line reset，故僅應在 host **未在使用 DAP** 時呼叫。
     pub async fn detect_target(&mut self) -> Option<TargetInfo> {
-        // line reset → JTAG-to-SWD 切換序列(0xE79E, LSB first) → line reset → idle
-        self.line_reset().await;
-        self.probe.write_bits(16, 0xE79E).await;
-        self.line_reset().await;
-        self.probe.write_bits(8, 0).await; // >=2 idle cycles
-
-        // 讀 DPIDR（DP addr0, RnW）；單一 DP 無回應 → 試 RP2040/RP2350 multidrop 選核心。
+        // B：多重喚醒（JTAG→SWD 切換、dormant→SWD）；皆失敗再試 RP multidrop（C）。
         let mut is_rp = false;
-        if self.transfer_retry(DP_DPIDR_RD, 0).await.0 != Ack::Ok {
+        if !self.swd_connect().await {
             if self.swd_select_rp().await {
                 is_rp = true;
             } else {
@@ -821,6 +855,9 @@ impl<'d> Dap<'d> {
             return None;
         }
 
+        // A：CPUID 通用核心辨識（任何 Cortex-M 都讀得到）。所有路徑共用。
+        let core = self.read_cpuid_part().await;
+
         // RP2040/RP2350：無 STM32 DBGMCU，已由 multidrop 選到核心即視為偵測成功，回報 RaspberryPi。
         if is_rp {
             return Some(TargetInfo {
@@ -828,6 +865,7 @@ impl<'d> Dap<'d> {
                 devid: 0,
                 part: 0,
                 rdp: RdpLevel::Unknown,
+                core,
             });
         }
 
@@ -851,12 +889,13 @@ impl<'d> Dap<'d> {
             part = self.read_mem32(0x1000_0100).await.unwrap_or(0);
         }
 
-        // 已通過 DPIDR+powerup，目標確實存在；即使廠商/型號未知也回報（讓 OLED 顯示廠商或 chip?）。
+        // 已通過 DPIDR+powerup，目標確實存在；即使廠商/型號未知也回報（OLED 至少顯示核心）。
         Some(TargetInfo {
             designer,
             devid,
             part,
             rdp,
+            core,
         })
     }
 
@@ -984,7 +1023,8 @@ impl<'d> Dap<'d> {
     /// 讀 DPIDR（DP addr0）；**重試多次**,任一成功即回 true（兼作在不在偵測 + 邏輯擷取訊號刺激）。
     /// 重試讓較差的線（4 線/長線/接點劣化）也能讀到,而非單次失敗就判無目標。
     pub async fn swd_read_dpidr(&mut self) -> bool {
-        for _ in 0..6 {
+        for _ in 0..12 {
+            // D：重試加倍（爛線/長線/接點劣化也撐到底）。
             if self.swd_transfer(DP_DPIDR_RD, 0).await.0 == Ack::Ok {
                 return true;
             }
