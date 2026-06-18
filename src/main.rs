@@ -87,6 +87,9 @@ struct TargetShared {
     link_ap: AtomicU32,
     /// 目前正在嘗試的偵測 SWCLK（kHz）：掃頻每步更新。OLED 無目標時顯示，反映掃到哪個頻率。
     probe_khz: AtomicU32,
+    /// 上一窗擷取的 SWCLK / SWDIO 邊緣(跳變)數。SWCLK 由探針自驅 → CLK e=0 即探針輸出死。
+    clk_edges: AtomicU32,
+    dio_edges: AtomicU32,
 }
 
 impl TargetShared {
@@ -102,6 +105,8 @@ impl TargetShared {
             link_dp: AtomicU32::new(0),
             link_ap: AtomicU32::new(0),
             probe_khz: AtomicU32::new(0),
+            clk_edges: AtomicU32::new(0),
+            dio_edges: AtomicU32::new(0),
         }
     }
     /// 記錄掃頻目前嘗試的速率（kHz）。
@@ -110,6 +115,17 @@ impl TargetShared {
     }
     fn probe_khz(&self) -> u32 {
         self.probe_khz.load(Ordering::Relaxed)
+    }
+    /// 記錄上一窗 SWCLK / SWDIO 邊緣數。
+    fn set_edges(&self, clk: u32, dio: u32) {
+        self.clk_edges.store(clk, Ordering::Relaxed);
+        self.dio_edges.store(dio, Ordering::Relaxed);
+    }
+    fn edges(&self) -> (u32, u32) {
+        (
+            self.clk_edges.load(Ordering::Relaxed),
+            self.dio_edges.load(Ordering::Relaxed),
+        )
     }
     /// 寫入偵測結果（designer/part/flash 先寫，devid 含有效旗標最後寫）。
     fn store(&self, info: &dap::TargetInfo) {
@@ -210,16 +226,6 @@ impl WaveRing {
             let (c, d) = logic::sample_at(buf, start + k);
             Self::set_bit(&self.clk, pos, c);
             Self::set_bit(&self.dio, pos, d);
-            pos = (pos + 1) % WAVE_COLS;
-        }
-        self.pos.store(pos as u32, Ordering::Relaxed);
-    }
-    /// 無回應(拔線/無目標)：推進 WAVE_PUSH 欄平線 → 平段捲入畫面，直覺反映「沒訊號」。
-    fn push_flat(&self) {
-        let mut pos = self.pos.load(Ordering::Relaxed) as usize;
-        for _ in 0..WAVE_PUSH {
-            Self::set_bit(&self.clk, pos, false);
-            Self::set_bit(&self.dio, pos, false);
             pos = (pos + 1) % WAVE_COLS;
         }
         self.pos.store(pos as u32, Ordering::Relaxed);
@@ -489,15 +495,20 @@ async fn idle_scan(
     let used = adaptive_sweep(dap, sticky).await;
     TARGET.set_used_khz(used);
 
+    // 每輪都擷取一窗：以 swd_wakeup + 讀 DPIDR 驅動 SWCLK 當刺激（不論有無目標），
+    // 量 SWCLK/SWDIO 邊緣。SWCLK 由探針自驅 → 應一直 toggle；CLK 邊緣=0 即探針輸出死。
     let mut buf = [0u32; logic::CAP_WORDS];
+    cap.start();
+    let xfer = cap.dma_into(&mut buf);
+    dap.swd_wakeup().await;
+    let _ = dap.swd_read_dpidr().await;
+    let _ = select(xfer, Timer::after(Duration::from_millis(20))).await;
+    cap.stop();
+    let (clk_e, dio_e) = count_edges(&buf);
+    TARGET.set_edges(clk_e, dio_e);
+    WAVE.push(&buf);
+
     if used != 0 {
-        // 以可用速率擷取波形（再讀一次 DPIDR 當訊號刺激）。
-        cap.start();
-        let xfer = cap.dma_into(&mut buf);
-        let _ = dap.swd_read_dpidr().await;
-        let _ = select(xfer, Timer::after(Duration::from_millis(20))).await;
-        cap.stop();
-        WAVE.push(&buf);
         *absent = 0;
         // 晶片偵測只在尚未鎖定時做一次（含 RP multidrop）。
         if !TARGET.valid()
@@ -509,8 +520,6 @@ async fn idle_scan(
         let q = dap.link_quality().await;
         TARGET.set_link(&q);
     } else {
-        // 無回應（拔線/無目標）→ 推進平線,平段捲入畫面反映「沒訊號」。
-        WAVE.push_flat();
         *absent += 1;
         TARGET.set_link(&dap::LinkQuality { dp: 0, ap: 0 });
         if *absent >= 2 {
@@ -518,6 +527,27 @@ async fn idle_scan(
         }
     }
     dap.set_swclk_khz(saved_khz); // 還原 host 設定
+}
+
+/// 數擷取窗內 SWCLK / SWDIO 的跳變(邊緣)數。回 (clk_edges, dio_edges)。
+/// CLK 由探針自驅 → CLK 邊緣=0 代表探針沒驅動出 SWCLK(GP2 pad 死);
+/// CLK 邊緣>0 但 DIO 邊緣=0 → 探針有時脈、是目標/SWDIO 無回應。
+#[cfg(feature = "active-detect")]
+fn count_edges(buf: &[u32]) -> (u32, u32) {
+    let (mut pc, mut pd) = logic::sample_at(buf, 0);
+    let (mut ce, mut de) = (0u32, 0u32);
+    for i in 1..logic::SAMPLES {
+        let (c, d) = logic::sample_at(buf, i);
+        if c != pc {
+            ce += 1;
+            pc = c;
+        }
+        if d != pd {
+            de += 1;
+            pd = d;
+        }
+    }
+    (ce, de)
 }
 
 /// OLED 顯示，跑在 **core1**：上 3 行文字（版本/晶片/可燒狀態）+ 下半 SWD 訊號品質即時波形。
@@ -576,8 +606,10 @@ async fn oled_task(mut dbg: display::DebugOled, mut led: Output<'static>) {
             let (dp, ap) = TARGET.link();
             let _ = write!(l_scale, "DP{}/16 AP{}/16 {}k", dp, ap, used);
         } else {
-            // 無目標：顯示目前嘗試的偵測頻率（掃頻會在 1000→…→20k 變動，也反映在掃）。
-            let _ = write!(l_scale, "probing {}k no sig", TARGET.probe_khz());
+            // 無目標：顯示 SWCLK/SWDIO 邊緣數 + 探測頻率（診斷探針輸出死活）。
+            // Ce=0 → 探針沒驅出 SWCLK(GP2 死);Ce>0 De=0 → 有時脈、目標/SWDIO 無回應。
+            let (ce, de) = TARGET.edges();
+            let _ = write!(l_scale, "Ce{} De{} {}k", ce, de, TARGET.probe_khz());
         }
         dbg.render(&display::OledModel {
             chip: l_chip.as_str(),
