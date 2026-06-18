@@ -11,7 +11,7 @@ use embedded_graphics::mono_font::ascii::FONT_6X10;
 use embedded_graphics::mono_font::MonoTextStyle;
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::*;
-use embedded_graphics::primitives::{Line, PrimitiveStyle};
+use embedded_graphics::primitives::{Line, PrimitiveStyle, Rectangle};
 use embedded_graphics::text::{Baseline, Text};
 use ssd1306::mode::BufferedGraphicsMode;
 use ssd1306::prelude::*;
@@ -20,19 +20,28 @@ use ssd1306::{I2CDisplayInterface, Ssd1306};
 type Iface = I2CInterface<I2c<'static, I2C1, Blocking>>;
 type Oled = Ssd1306<Iface, DisplaySize128x64, BufferedGraphicsMode<DisplaySize128x64>>;
 
+/// 右側柱狀圖一條：label（≤2 字）+ 數值/上限（畫成長度 = value/max 的橫條）。
+pub struct Bar {
+    pub label: &'static str,
+    pub value: u32,
+    pub max: u32,
+}
+
 /// OLED 一幀的顯示模型（由 oled_task 組裝、`DebugOled::render` 繪製）。
 pub struct OledModel<'a> {
     /// 第 1 行：晶片型號 / "no target"。
     pub chip: &'a str,
-    /// 第 2 行：可燒錄狀態（RDP）；無目標時空字串。
+    /// 第 2 行：可燒錄狀態（RDP）+ 頻率。
     pub flash: &'a str,
     /// SWCLK/SWDIO token-ring 環形緩衝（128 欄各 1 bit，4×u32）。
     pub clk: [u32; 4],
     pub dio: [u32; 4],
     /// ring 最舊欄（由舊→新繪製 → 畫面向左捲動）。
     pub pos: usize,
-    /// 第 5 行：刻度 / 連線品質訊號儀。
+    /// 左下角文字（連線品質 DP/AP；無目標時空字串）。
     pub scale: &'a str,
+    /// 右側柱狀圖（Ce/De/h… 等狀態），由上而下排列。
+    pub bars: &'a [Bar],
 }
 
 pub struct DebugOled {
@@ -80,8 +89,8 @@ impl DebugOled {
             let _ = Text::with_baseline(line, Point::new(0, y), text, Baseline::Top).draw(o);
         }
 
-        // 下方兩通道方波：C(SWCLK) 在 y≈26..34、D(SWDIO) 在 y≈42..50；左標 C/D，波形 x=8..127。
-        const COLS: i32 = 120; // 顯示 120 欄（x=8..127）
+        // 下方兩通道方波（縮窄到左側 x=8..78，右側讓給柱狀圖）：C(SWCLK) y≈26..34、D(SWDIO) y≈42..50。
+        const COLS: i32 = 70; // 波形 70 欄（x=8..78）
         // 第 c 欄 → ring 索引 (pos + c) % 128（pos=最舊,故由舊到新、向左捲動）。
         let rbit = |arr: &[u32; 4], c: i32| {
             let rc = (m.pos as i32 + c).rem_euclid(128) as usize;
@@ -105,8 +114,30 @@ impl DebugOled {
                 }
             }
         }
-        // 第 5 行：刻度 / 訊號儀（y=53）。
+        // 左下角：連線品質文字 DP/AP（y=53）。
         let _ = Text::with_baseline(m.scale, Point::new(0, 53), text, Baseline::Top).draw(o);
+
+        // 右側柱狀圖面板（x=82..127）：每條 label(≤2字) + 長度 = value/max 的橫條。
+        const PANEL_X: i32 = 82;
+        const BAR_X0: i32 = 96; // 條起點（label 後）
+        const BAR_W: u32 = 30; // 條最大寬（96..126）
+        let fill = PrimitiveStyle::with_fill(BinaryColor::On);
+        for (i, b) in m.bars.iter().take(4).enumerate() {
+            let y = 22 + i as i32 * 10;
+            let _ = Text::with_baseline(b.label, Point::new(PANEL_X, y - 1), text, Baseline::Top)
+                .draw(o);
+            // 外框
+            let _ = Rectangle::new(Point::new(BAR_X0, y), Size::new(BAR_W, 7))
+                .into_styled(stroke)
+                .draw(o);
+            // 填充長度 = value/max
+            let w = (b.value.min(b.max) * BAR_W).checked_div(b.max).unwrap_or(0);
+            if w > 0 {
+                let _ = Rectangle::new(Point::new(BAR_X0, y), Size::new(w, 7))
+                    .into_styled(fill)
+                    .draw(o);
+            }
+        }
         // flush 失敗（如 GND 熱拔造成 I2C 突波/SSD1306 異常）→ 重新 init，使 OLED 自癒。
         if o.flush().is_err() {
             let _ = o.init();

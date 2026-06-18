@@ -617,20 +617,23 @@ async fn oled_task(mut dbg: display::DebugOled, mut led: Output<'static>) {
         let clk = WAVE.load_clk();
         let dio = WAVE.load_dio();
         let pos = WAVE.pos();
-        // 第 5 行：連線品質訊號儀 — DP(短交易) / AP(AHB 長交易,燒錄需要) 各 /16 + 鎖定 SWCLK。
-        // 接線時看這行：AP 往 16 爬 = 訊號變好；DP16/AP0 穩定 = RDP1 讀保護(非 SI)。
+        // 左下角文字：偵測到時顯示連線品質 DP/AP；無目標則空白（訊號量在右側柱狀圖）。
         let mut l_scale: heapless::String<21> = heapless::String::new();
         let used = TARGET.used_khz();
         if used > 0 {
             let (dp, ap) = TARGET.link();
-            let _ = write!(l_scale, "DP{}/16 AP{}/16", dp, ap); // 頻率移到第 2 行
-        } else {
-            // 無目標：SWCLK/SWDIO 邊緣數 + SM1 高電位佔比%（診斷探針輸出死活）。
-            // Ce=0 h100 → 卡高;Ce=0 h0 → 卡低;Ce 多 h≈50 → 正常 toggle。
-            let (ce, de, ch, dh) = TARGET.signal();
-            let s = logic::SAMPLES as u32;
-            let _ = write!(l_scale, "Ce{} De{} h{}/{}", ce, de, ch * 100 / s, dh * 100 / s);
+            let _ = write!(l_scale, "DP{}/16 AP{}/16", dp, ap);
         }
+        // 右側柱狀圖：SWCLK/SWDIO 邊緣(Ce/De)與高電位佔比(hC/hD)。
+        // Ce0 hC0=卡低、Ce0 hC100=卡高、Ce 多 hC≈50=正常 toggle。
+        let (ce, de, ch, dh) = TARGET.signal();
+        let s = logic::SAMPLES as u32;
+        let bars = [
+            display::Bar { label: "Ce", value: ce, max: 64 },
+            display::Bar { label: "De", value: de, max: 64 },
+            display::Bar { label: "hC", value: ch * 100 / s, max: 100 },
+            display::Bar { label: "hD", value: dh * 100 / s, max: 100 },
+        ];
         dbg.render(&display::OledModel {
             chip: l_chip.as_str(),
             flash: l_flash.as_str(),
@@ -638,6 +641,7 @@ async fn oled_task(mut dbg: display::DebugOled, mut led: Output<'static>) {
             dio,
             pos,
             scale: l_scale.as_str(),
+            bars: &bars,
         });
         Timer::after(Duration::from_millis(250)).await;
     }
