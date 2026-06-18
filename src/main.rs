@@ -241,6 +241,16 @@ impl WaveRing {
         }
         self.pos.store(pos as u32, Ordering::Relaxed);
     }
+    /// 無目標：推進 WAVE_PUSH 欄平線（平段捲入畫面反映「沒訊號」）。
+    fn push_flat(&self) {
+        let mut pos = self.pos.load(Ordering::Relaxed) as usize;
+        for _ in 0..WAVE_PUSH {
+            Self::set_bit(&self.clk, pos, false);
+            Self::set_bit(&self.dio, pos, false);
+            pos = (pos + 1) % WAVE_COLS;
+        }
+        self.pos.store(pos as u32, Ordering::Relaxed);
+    }
     fn snapshot(arr: &[AtomicU32; 4]) -> [u32; 4] {
         [
             arr[0].load(Ordering::Relaxed),
@@ -498,33 +508,32 @@ async fn idle_scan(
     let used = adaptive_sweep(dap, sticky).await;
     TARGET.set_used_khz(used);
 
-    // 每輪都擷取一窗：以 swd_wakeup + 讀 DPIDR 驅動 SWCLK 當刺激（不論有無目標），
-    // 量 SWCLK/SWDIO 邊緣。SWCLK 由探針自驅 → 應一直 toggle；CLK 邊緣=0 即探針輸出死。
     let mut buf = [0u32; logic::CAP_WORDS];
-    cap.start();
-    let xfer = cap.dma_into(&mut buf);
-    dap.swd_wakeup().await;
-    let _ = dap.swd_read_dpidr().await;
-    let _ = select(xfer, Timer::after(Duration::from_millis(20))).await;
-    cap.stop();
-    let (ce, de, ch, dh) = count_signal(&buf);
-    TARGET.set_signal(ce, de, ch, dh);
-    WAVE.push(&buf);
-
     if used != 0 {
         *absent = 0;
-        // 晶片偵測只在尚未鎖定時做一次（含 RP multidrop）。
+        // 偵測到目標(可用速率)才擷取波形 + 量邊緣(此時 SWCLK 在跑、量得到真訊號)。
+        cap.start();
+        let xfer = cap.dma_into(&mut buf);
+        let _ = dap.swd_read_dpidr().await; // 訊號刺激
+        let _ = select(xfer, Timer::after(Duration::from_millis(20))).await;
+        cap.stop();
+        let (ce, de, ch, dh) = count_signal(&buf);
+        TARGET.set_signal(ce, de, ch, dh);
+        WAVE.push(&buf);
+        // 晶片偵測只在尚未鎖定時做一次。
         if !TARGET.valid()
             && let Some(info) = dap.detect_target().await
         {
             TARGET.store(&info);
         }
-        // 連線品質（每輪）→ OLED 訊號儀，讓使用者照數字接出最佳線路。
         let q = dap.link_quality().await;
         TARGET.set_link(&q);
     } else {
-        *absent += 1;
+        // 無目標：不擷取(低速擷取無意義)、推平線、歸零。
+        WAVE.push_flat();
+        TARGET.set_signal(0, 0, 0, 0);
         TARGET.set_link(&dap::LinkQuality { dp: 0, ap: 0 });
+        *absent += 1;
         if *absent >= 2 {
             TARGET.clear();
         }
