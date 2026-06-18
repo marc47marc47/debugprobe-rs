@@ -182,16 +182,7 @@ impl RdpLevel {
             _ => RdpLevel::Unknown,
         }
     }
-    /// OLED「可燒狀態」行文字。
-    pub fn label(self) -> &'static str {
-        match self {
-            RdpLevel::Open => "flash OK (RDP0)",
-            RdpLevel::Level1 => "flash LOCK(RDP1)",
-            RdpLevel::Level2 => "flash RDP2 dead",
-            RdpLevel::Unknown => "flash unknown",
-        }
-    }
-    /// 短標（左側面板有限寬度用，不撞右側柱狀圖）。
+    /// OLED「可燒狀態」短標（左側面板有限寬度用，不撞右側柱狀圖）。
     pub fn short(self) -> &'static str {
         match self {
             RdpLevel::Open => "RDP0",
