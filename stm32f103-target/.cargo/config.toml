@@ -1,0 +1,16 @@
+# STM32F103 = Cortex-M3（無 FPU）→ thumbv7m-none-eabi。
+# 此設定較根目錄 .cargo/config.toml 更靠近 cwd，build.target 由本檔勝出（覆蓋根的 thumbv6m）。
+[build]
+target = "thumbv7m-none-eabi"
+
+[target.thumbv7m-none-eabi]
+runner = "probe-rs run --chip STM32F103C8Tx"
+rustflags = [
+    "-C", "link-arg=--nmagic",
+    "-C", "link-arg=-Tlink.x",
+    "-C", "link-arg=-Tdefmt.x",
+]
+# memory.x 由 embassy-stm32 的 "memory-x" feature 依晶片自動產生（不需手寫，也不要 link-rp.x）。
+
+[env]
+DEFMT_LOG = "debug"

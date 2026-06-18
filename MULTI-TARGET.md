@@ -9,6 +9,7 @@ debugprobe-rs 探針是**通用 CMSIS-DAP SWD 探針**,與目標晶片無關 →
 | Raspberry Pi Pico | RP2040 (Cortex-M0+) | `src/bin/uarthello\|uartmon\|uartecho.rs` | ✅ 實機驗證 |
 | WeAct Black Pill | STM32F401CCU6（矽晶實為 401xE/512KB）(Cortex-M4F) | `stm32f401-target/` | ✅ **實機驗證**（2026-06-16）|
 | Nucleo-F446RE | STM32F446RET6 (Cortex-M4F, 512KB/128KB) | `stm32f446-target/` | ✅ **實機驗證**（2026-06-16）；接線/流程見 [`TEST-stm32f446re.md`](TEST-stm32f446re.md) |
+| Blue Pill | STM32F103C8T6 (Cortex-M3, 64KB/20KB) | `stm32f103-target/` | 🟡 韌體完成、待實機驗證；腳位/功能同 F401 |
 
 ---
 
@@ -105,3 +106,47 @@ LED 改 **PA5**(Nucleo LD2, active-high)、runner/chip `STM32F446RETx`;USART1(PA
    「halt 後 reset timeout」。但**純 `halt` 成功**(DHCSR S_HALT=1)。可靠流程:`halt → flash write_image
    erase → SYSRESETREQ run`(完整指令見 [`TEST-stm32f446re.md`](TEST-stm32f446re.md) §4b)。
    若你的 Nucleo NRST 無共線干擾,`probe-rs download --chip STM32F446RETx` 可直接用。
+
+---
+
+## STM32F103C8 "Blue Pill"
+
+最便宜常見的 layer-2 目標。crate `stm32f103-target/` **鏡像 `stm32f401-target/`,腳位與功能完全一致**,
+只差晶片本身:F103 是 **Cortex-M3(無 FPU)** → target `thumbv7m-none-eabi`、embassy-stm32 feature
+`stm32f103c8`、runner/chip `STM32F103C8Tx`。OLED 自動偵測認得它(DBGMCU DEV_ID `0x410` → 顯示 `STM32F1/GD32`)。
+
+### 接線:探針 A（Pico, board-pico）→ Blue Pill（與 F401 同腳位）
+
+| 探針 A | Blue Pill | 備註 |
+|---|---|---|
+| GP2 SWCLK | SWCLK (PA14) | 板邊 4-pin SWD 排針 |
+| GP3 SWDIO | SWDIO (PA13) | 板邊 4-pin SWD 排針 |
+| GND | GND | **就近短地線**（緊貼 SWDIO） |
+| GP1 (nRESET) | R(NRST) | 解 RDP / connect-under-reset 用 |
+| GP4 (UART1 TX) | PA10 (USART1 RX) | |
+| GP5 (UART1 RX) | PA9 (USART1 TX) | |
+| — | OLED SCL=PB8 / SDA=PB9 | VCC=3V3、GND（PB8/PB9 走 I2C1 重映射，embassy 自動）|
+| — | LED = PC13（板載,active-low）| 免接線 |
+| — | USB / 3V3 | Blue Pill 自身供電（勿只靠 SWD 腳寄生供電）|
+
+### 燒錄
+
+```bash
+./flash.sh f103          # = build + probe-rs download + reset（序號自動偵測）
+# 等同：
+cd stm32f103-target && cargo build --release
+probe-rs download --chip STM32F103C8Tx --probe 2e8a:000c-0:<serial> --protocol swd --speed 1000 \
+  target/thumbv7m-none-eabi/release/stm32f103-target
+probe-rs reset --chip STM32F103C8Tx --probe 2e8a:000c-0:<serial> --protocol swd
+```
+
+### 與 F401 的差異（移植時的重點）
+
+1. **架構**:Cortex-M3 無 FPU → `thumbv7m-none-eabi`(非 `thumbv7em-none-eabihf`)。flash.sh 的
+   `flash_stm32` 第 3 參數傳 target triple。
+2. **I2C v1**:F103 的 `i2c::Config` **沒有** `scl_pullup/sda_pullup`(那是 F4 的 I2C v2)→ 移除,
+   靠 OLED 模組自帶上拉。PB8/PB9 在 F1 需 I2C1 **重映射**,embassy-stm32 依所用腳位自動設定 AFIO。
+3. **RDP 解保護**用 `stm32f1x unlock 0`(F1 系列;F4 是 `stm32f2x unlock 0`)。Blue Pill 多半 RDP 關著,
+   通常可直接 `probe-rs download`;若連線失敗才需解。
+4. **Blue Pill 山寨晶片**(CKS/CS32 等)常見:多數仍以 `STM32F103C8Tx` 正常燒;少數 flash 實為 128KB
+   或 DEV_ID 略異。若 download 報容量不符,改用 `STM32F103CBTx`。
