@@ -85,8 +85,8 @@ struct TargetShared {
     /// 連線品質訊號儀：每輪 16 次讀取成功數（DP 短交易 / AP AHB 長交易）。
     link_dp: AtomicU32,
     link_ap: AtomicU32,
-    /// 偵測心跳：每輪自主掃描 +1。OLED 顯示用來分辨「活著但無目標」vs「真的當掉」。
-    scan: AtomicU32,
+    /// 目前正在嘗試的偵測 SWCLK（kHz）：掃頻每步更新。OLED 無目標時顯示，反映掃到哪個頻率。
+    probe_khz: AtomicU32,
 }
 
 impl TargetShared {
@@ -101,16 +101,15 @@ impl TargetShared {
             used_khz: AtomicU32::new(0),
             link_dp: AtomicU32::new(0),
             link_ap: AtomicU32::new(0),
-            scan: AtomicU32::new(0),
+            probe_khz: AtomicU32::new(0),
         }
     }
-    /// 偵測心跳 +1（每輪 idle_scan 呼叫）。
-    fn tick(&self) {
-        self.scan
-            .store(self.scan.load(Ordering::Relaxed).wrapping_add(1), Ordering::Relaxed);
+    /// 記錄掃頻目前嘗試的速率（kHz）。
+    fn set_probe_khz(&self, khz: u32) {
+        self.probe_khz.store(khz, Ordering::Relaxed);
     }
-    fn scan(&self) -> u32 {
-        self.scan.load(Ordering::Relaxed)
+    fn probe_khz(&self) -> u32 {
+        self.probe_khz.load(Ordering::Relaxed)
     }
     /// 寫入偵測結果（designer/part/flash 先寫，devid 含有效旗標最後寫）。
     fn store(&self, info: &dap::TargetInfo) {
@@ -449,12 +448,14 @@ async fn dap_task(
 #[cfg(feature = "active-detect")]
 async fn adaptive_sweep(dap: &mut dap::Dap<'static>, sticky: &mut u32) -> u32 {
     // 1) single-drop：先試黏著速率，再由快到慢掃（全程不寫 TARGETSEL，不會誤刪 DPv2 STM32）。
+    TARGET.set_probe_khz(*sticky);
     dap.set_swclk_khz(*sticky);
     dap.swd_wakeup().await;
     if dap.swd_read_dpidr().await {
         return *sticky;
     }
     for &khz in &[1000u32, 500, 250, 100, 50, 20] {
+        TARGET.set_probe_khz(khz);
         dap.set_swclk_khz(khz);
         dap.swd_wakeup().await;
         if dap.swd_read_dpidr().await {
@@ -464,6 +465,7 @@ async fn adaptive_sweep(dap: &mut dap::Dap<'static>, sticky: &mut u32) -> u32 {
     }
     // 2) 單核完全無回應 → 才試 RP2040/RP2350 multidrop（會寫 TARGETSEL，故只當 last resort）。
     for &khz in &[1000u32, 500, 250] {
+        TARGET.set_probe_khz(khz);
         dap.set_swclk_khz(khz);
         if dap.swd_select_rp().await {
             *sticky = khz;
@@ -483,7 +485,6 @@ async fn idle_scan(
     absent: &mut u32,
 ) {
     use embassy_futures::select::select;
-    TARGET.tick(); // 偵測心跳（每輪 +1，OLED 顯示用以確認探針未當機）
     let saved_khz = dap.swclk_khz();
     let used = adaptive_sweep(dap, sticky).await;
     TARGET.set_used_khz(used);
@@ -571,13 +572,12 @@ async fn oled_task(mut dbg: display::DebugOled, mut led: Output<'static>) {
         // 接線時看這行：AP 往 16 爬 = 訊號變好；DP16/AP0 穩定 = RDP1 讀保護(非 SI)。
         let mut l_scale: heapless::String<21> = heapless::String::new();
         let used = TARGET.used_khz();
-        let beat = TARGET.scan() % 1000; // 心跳：每輪偵測 +1
         if used > 0 {
             let (dp, ap) = TARGET.link();
             let _ = write!(l_scale, "DP{}/16 AP{}/16 {}k", dp, ap, used);
         } else {
-            // 無目標：顯示遞增心跳 → 一眼分辨「活著掃描中」vs「真的當掉」。
-            let _ = write!(l_scale, "scan #{} no signal", beat);
+            // 無目標：顯示目前嘗試的偵測頻率（掃頻會在 1000→…→20k 變動，也反映在掃）。
+            let _ = write!(l_scale, "probing {}k no sig", TARGET.probe_khz());
         }
         dbg.render(&display::OledModel {
             chip: l_chip.as_str(),
