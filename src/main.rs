@@ -85,6 +85,8 @@ struct TargetShared {
     /// 連線品質訊號儀：每輪 16 次讀取成功數（DP 短交易 / AP AHB 長交易）。
     link_dp: AtomicU32,
     link_ap: AtomicU32,
+    /// 偵測心跳：每輪自主掃描 +1。OLED 顯示用來分辨「活著但無目標」vs「真的當掉」。
+    scan: AtomicU32,
 }
 
 impl TargetShared {
@@ -99,7 +101,16 @@ impl TargetShared {
             used_khz: AtomicU32::new(0),
             link_dp: AtomicU32::new(0),
             link_ap: AtomicU32::new(0),
+            scan: AtomicU32::new(0),
         }
+    }
+    /// 偵測心跳 +1（每輪 idle_scan 呼叫）。
+    fn tick(&self) {
+        self.scan
+            .store(self.scan.load(Ordering::Relaxed).wrapping_add(1), Ordering::Relaxed);
+    }
+    fn scan(&self) -> u32 {
+        self.scan.load(Ordering::Relaxed)
     }
     /// 寫入偵測結果（designer/part/flash 先寫，devid 含有效旗標最後寫）。
     fn store(&self, info: &dap::TargetInfo) {
@@ -472,6 +483,7 @@ async fn idle_scan(
     absent: &mut u32,
 ) {
     use embassy_futures::select::select;
+    TARGET.tick(); // 偵測心跳（每輪 +1，OLED 顯示用以確認探針未當機）
     let saved_khz = dap.swclk_khz();
     let used = adaptive_sweep(dap, sticky).await;
     TARGET.set_used_khz(used);
@@ -559,11 +571,13 @@ async fn oled_task(mut dbg: display::DebugOled, mut led: Output<'static>) {
         // 接線時看這行：AP 往 16 爬 = 訊號變好；DP16/AP0 穩定 = RDP1 讀保護(非 SI)。
         let mut l_scale: heapless::String<21> = heapless::String::new();
         let used = TARGET.used_khz();
+        let beat = TARGET.scan() % 1000; // 心跳：每輪偵測 +1
         if used > 0 {
             let (dp, ap) = TARGET.link();
             let _ = write!(l_scale, "DP{}/16 AP{}/16 {}k", dp, ap, used);
         } else {
-            let _ = write!(l_scale, "no signal  clk --");
+            // 無目標：顯示遞增心跳 → 一眼分辨「活著掃描中」vs「真的當掉」。
+            let _ = write!(l_scale, "scan #{} no signal", beat);
         }
         dbg.render(&display::OledModel {
             chip: l_chip.as_str(),
