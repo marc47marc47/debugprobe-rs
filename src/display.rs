@@ -20,6 +20,21 @@ use ssd1306::{I2CDisplayInterface, Ssd1306};
 type Iface = I2CInterface<I2c<'static, I2C1, Blocking>>;
 type Oled = Ssd1306<Iface, DisplaySize128x64, BufferedGraphicsMode<DisplaySize128x64>>;
 
+/// OLED 一幀的顯示模型（由 oled_task 組裝、`DebugOled::render` 繪製）。
+pub struct OledModel<'a> {
+    /// 第 1 行：晶片型號 / "no target"。
+    pub chip: &'a str,
+    /// 第 2 行：可燒錄狀態（RDP）；無目標時空字串。
+    pub flash: &'a str,
+    /// SWCLK/SWDIO token-ring 環形緩衝（128 欄各 1 bit，4×u32）。
+    pub clk: [u32; 4],
+    pub dio: [u32; 4],
+    /// ring 最舊欄（由舊→新繪製 → 畫面向左捲動）。
+    pub pos: usize,
+    /// 第 5 行：刻度 / 連線品質訊號儀。
+    pub scale: &'a str,
+}
+
 pub struct DebugOled {
     oled: Option<Oled>,
 }
@@ -52,36 +67,27 @@ impl DebugOled {
     }
 
     /// SWD 數位邏輯波形顯示（2 通道方波,像邏輯示波器；token-ring 捲動）：
-    /// 上方 `lines`（晶片型號 / 可燒狀態,y=0/12）;下方 SWCLK(C)、SWDIO(D) 兩通道方波。
-    /// `clk`/`dio` 為 128 欄環形緩衝（4×u32),`pos` = ring 最舊欄；由舊→新繪製→畫面向左捲動。
-    pub fn status_logic(
-        &mut self,
-        lines: &[&str],
-        clk: &[u32; 4],
-        dio: &[u32; 4],
-        pos: usize,
-        scale: &str,
-    ) {
+    /// 上方晶片型號 / 可燒狀態（y=0/12）;下方 SWCLK(C)、SWDIO(D) 兩通道方波;第 5 行刻度/訊號儀。
+    pub fn render(&mut self, m: &OledModel) {
         let Some(o) = &mut self.oled else { return };
         let _ = o.clear(BinaryColor::Off);
         let text = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
         let stroke = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
 
         // 上方文字 2 行（晶片 / 可燒狀態）。
-        let mut y = 0i32;
-        for line in lines {
+        for (i, line) in [m.chip, m.flash].iter().enumerate() {
+            let y = (i as i32) * 12;
             let _ = Text::with_baseline(line, Point::new(0, y), text, Baseline::Top).draw(o);
-            y += 12;
         }
 
         // 下方兩通道方波：C(SWCLK) 在 y≈26..34、D(SWDIO) 在 y≈42..50；左標 C/D，波形 x=8..127。
         const COLS: i32 = 120; // 顯示 120 欄（x=8..127）
         // 第 c 欄 → ring 索引 (pos + c) % 128（pos=最舊,故由舊到新、向左捲動）。
         let rbit = |arr: &[u32; 4], c: i32| {
-            let rc = (pos as i32 + c).rem_euclid(128) as usize;
+            let rc = (m.pos as i32 + c).rem_euclid(128) as usize;
             (arr[rc / 32] >> (rc % 32)) & 1 != 0
         };
-        for (lbl, arr, hi) in [("C", clk, 26i32), ("D", dio, 42i32)] {
+        for (lbl, arr, hi) in [("C", &m.clk, 26i32), ("D", &m.dio, 42i32)] {
             let lo = hi + 8;
             let _ = Text::with_baseline(lbl, Point::new(0, hi - 1), text, Baseline::Top).draw(o);
             let lvl = |b: bool| if b { hi } else { lo };
@@ -99,8 +105,8 @@ impl DebugOled {
                 }
             }
         }
-        // 第 5 行：刻度（y=53）。
-        let _ = Text::with_baseline(scale, Point::new(0, 53), text, Baseline::Top).draw(o);
+        // 第 5 行：刻度 / 訊號儀（y=53）。
+        let _ = Text::with_baseline(m.scale, Point::new(0, 53), text, Baseline::Top).draw(o);
         // flush 失敗（如 GND 熱拔造成 I2C 突波/SSD1306 異常）→ 重新 init，使 OLED 自癒。
         if o.flush().is_err() {
             let _ = o.init();

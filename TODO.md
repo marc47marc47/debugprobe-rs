@@ -293,18 +293,23 @@
 - [x] `pub struct LinkQuality { dp, ap }`（`dap.link_quality()` 回傳，取代 `(u8,u8)` tuple）
 - [x] 驗證：active build + clippy **零警告**；probe/pico2/diag/min 全變體建置通過；行為不變
 
-### Phase 12.4 — OLED 顯示模型型別化（`src/display.rs` + `src/main.rs`）
-- [ ] `struct OledModel { chip, flash, clk, dio, pos, scale }`：`oled_task` 組裝、`DebugOled` 繪製
-- [ ] `display.rs` 繪製收斂（`status` / `status_logic` 共用版面與 flush-自癒）
-- [ ] 驗證
+### Phase 12.4 — OLED 顯示模型型別化（`src/display.rs` + `src/main.rs`）✅
+- [x] `pub struct OledModel { chip, flash, clk, dio, pos, scale }`：`oled_task` 組裝、`DebugOled::render(&OledModel)` 繪製
+- [x] `status_logic(5 個位置參數)` → `render(&OledModel)`（具名欄位，取代位置參數）
+- [x] 驗證：active build + clippy 零警告
 
-### Phase 12.5 — dap_task 偵測編排拆解（`src/main.rs`）
-- [ ] idle 偵測流程抽成獨立函式：自適應掃頻、波形擷取、晶片偵測、連線品質各自一個 fn
-- [ ] `enum SweepResult` / `enum LinkState` 表達偵測結果（取代散落 bool 與 `used==0`）
-- [ ] 驗證：三板 `build` + `clippy` 零警告
+### Phase 12.5 — dap_task 偵測編排拆解（`src/main.rs`）✅
+- [x] idle 偵測抽成獨立 async fn：`adaptive_sweep()`（黏著+遲滯掃頻，回傳 used kHz）、
+      `idle_scan()`（save/restore SWCLK + 擷取波形 + 晶片偵測 + 連線品質）；dap_task idle 分支縮成一行呼叫
+- [x] 清除 `-min`（active-detect 關閉）殘留警告：crate 層級 `#![cfg_attr(not(active-detect), allow(dead_code, unused_imports))]`
+      （完整版不受影響、仍零警告；避免對偵測子系統數十個項目逐一 cfg-gate）
+- [x] 驗證：active/default + min 兩種 clippy **皆零警告**；probe/pico2/diag/min/probe-min 全變體建置通過
+- 註：`enum SweepResult`/`LinkState` 暫不做——`used: u32`（0=無）已足夠表意，額外列舉無實益
 
-### Phase 12.6 — 結果處置
-- [ ] 全部子階段完成 → 三板建置 + clippy 零警告 + 實機回歸（probe-rs info / OLED 偵測）→ commit + tag
+### Phase 12.6 — 結果處置 ✅（重構完成）
+- [x] 12.1–12.5 全部完成；active/default + min 全 clippy 零警告；probe/pico/pico2/diag/min 全變體建置通過
+- [x] 每階段 commit（`3d390d8` 12.1+12.2、`a64f9b6` 12.3、本次 12.4+12.5）；純重構、行為不變
+- [ ] （待硬體）實機回歸：probe-rs info 偵錯 + OLED 自主偵測（含 RP2040 multidrop）目視確認
 
 ---
 

@@ -6,6 +6,9 @@
 
 #![no_std]
 #![no_main]
+// 最小診斷版（active-detect 關閉）：整個 OLED/偵測子系統未使用 → 抑制其 dead_code/unused_import。
+// 完整版（含 active-detect）不受影響，仍維持 clippy 零警告。
+#![cfg_attr(not(feature = "active-detect"), allow(dead_code, unused_imports))]
 
 use core::fmt::Write as _;
 use embassy_executor::{Executor, Spawner};
@@ -393,61 +396,77 @@ async fn dap_task(
         #[cfg(not(feature = "active-detect"))]
         let _ = idle;
 
-        // 閒置（含無 USB 連線）：擷取 SWD 數位邏輯波形 + 偵測晶片。
+        // 閒置（含無 USB 連線）：跑一輪自主掃描（擷取波形 + 偵測晶片 + 量連線品質）。
         #[cfg(feature = "active-detect")]
         if idle {
-            let saved_khz = dap.swclk_khz();
-            // 自適應 SWCLK（黏著 + 遲滯）：先試上次能通的速率；通過就維持（顯示穩定不亂跳）。
-            // 只有黏著速率失敗時，才由快到慢重掃並鎖到新的可用速率（訊號微弱時自動降速配合）。
-            // 先試單一 DP（STM32 等），再試 RP2040/RP2350 multidrop（swd_select_rp）。
-            let mut used = 0u32;
-            dap.set_swclk_khz(sticky_khz);
-            dap.swd_wakeup().await;
-            if dap.swd_read_dpidr().await || dap.swd_select_rp().await {
-                used = sticky_khz;
-            } else {
-                for &khz in &[1000u32, 500, 250, 100] {
-                    dap.set_swclk_khz(khz);
-                    dap.swd_wakeup().await;
-                    if dap.swd_read_dpidr().await || dap.swd_select_rp().await {
-                        used = khz;
-                        sticky_khz = khz; // 鎖定新速率
-                        break;
-                    }
-                }
-            }
-            TARGET.set_used_khz(used);
-
-            let mut buf = [0u32; logic::CAP_WORDS];
-            if used != 0 {
-                // 以可用速率擷取波形（再讀一次 DPIDR 當訊號刺激）。
-                cap.start();
-                let xfer = cap.dma_into(&mut buf);
-                let _ = dap.swd_read_dpidr().await;
-                let _ = select(xfer, Timer::after(Duration::from_millis(20))).await;
-                cap.stop();
-                WAVE.push(&buf);
-                absent = 0;
-                if !TARGET.valid()
-                    && let Some(info) = dap.detect_target().await
-                {
-                    TARGET.store(&info);
-                }
-                // 連線品質量測（每輪）→ OLED 訊號儀，讓使用者照數字接出最佳線路。
-                let q = dap.link_quality().await;
-                TARGET.set_link(&q);
-            } else {
-                // 無回應（拔線/無目標）→ 推進平線,平段捲入畫面反映「沒訊號」。
-                WAVE.push_flat();
-                absent += 1;
-                TARGET.set_link(&dap::LinkQuality { dp: 0, ap: 0 });
-                if absent >= 2 {
-                    TARGET.clear();
-                }
-            }
-            dap.set_swclk_khz(saved_khz); // 還原 host 設定
+            idle_scan(&mut dap, &mut cap, &mut sticky_khz, &mut absent).await;
         }
     }
+}
+
+/// 自適應 SWCLK（黏著 + 遲滯）：先試上次能通的速率，失敗則由快到慢重掃（含 RP2040 multidrop）。
+/// 回傳實際採用的速率(kHz)，0 = 沒讀到；命中較低速時更新 `sticky`（避免每輪重掃造成顯示亂跳）。
+#[cfg(feature = "active-detect")]
+async fn adaptive_sweep(dap: &mut dap::Dap<'static>, sticky: &mut u32) -> u32 {
+    dap.set_swclk_khz(*sticky);
+    dap.swd_wakeup().await;
+    if dap.swd_read_dpidr().await || dap.swd_select_rp().await {
+        return *sticky;
+    }
+    for &khz in &[1000u32, 500, 250, 100] {
+        dap.set_swclk_khz(khz);
+        dap.swd_wakeup().await;
+        if dap.swd_read_dpidr().await || dap.swd_select_rp().await {
+            *sticky = khz; // 鎖定新速率
+            return khz;
+        }
+    }
+    0
+}
+
+/// host 閒置時的一輪自主掃描：自適應掃頻 → 擷取波形 → 偵測晶片 → 量連線品質；更新 `TARGET`/`WAVE`。
+/// 全程 save/restore SWCLK，不留痕跡給 host。
+#[cfg(feature = "active-detect")]
+async fn idle_scan(
+    dap: &mut dap::Dap<'static>,
+    cap: &mut logic::LogicCapture<'static>,
+    sticky: &mut u32,
+    absent: &mut u32,
+) {
+    use embassy_futures::select::select;
+    let saved_khz = dap.swclk_khz();
+    let used = adaptive_sweep(dap, sticky).await;
+    TARGET.set_used_khz(used);
+
+    let mut buf = [0u32; logic::CAP_WORDS];
+    if used != 0 {
+        // 以可用速率擷取波形（再讀一次 DPIDR 當訊號刺激）。
+        cap.start();
+        let xfer = cap.dma_into(&mut buf);
+        let _ = dap.swd_read_dpidr().await;
+        let _ = select(xfer, Timer::after(Duration::from_millis(20))).await;
+        cap.stop();
+        WAVE.push(&buf);
+        *absent = 0;
+        // 晶片偵測只在尚未鎖定時做一次（含 RP multidrop）。
+        if !TARGET.valid()
+            && let Some(info) = dap.detect_target().await
+        {
+            TARGET.store(&info);
+        }
+        // 連線品質（每輪）→ OLED 訊號儀，讓使用者照數字接出最佳線路。
+        let q = dap.link_quality().await;
+        TARGET.set_link(&q);
+    } else {
+        // 無回應（拔線/無目標）→ 推進平線,平段捲入畫面反映「沒訊號」。
+        WAVE.push_flat();
+        *absent += 1;
+        TARGET.set_link(&dap::LinkQuality { dp: 0, ap: 0 });
+        if *absent >= 2 {
+            TARGET.clear();
+        }
+    }
+    dap.set_swclk_khz(saved_khz); // 還原 host 設定
 }
 
 /// OLED 顯示，跑在 **core1**：上 3 行文字（版本/晶片/可燒狀態）+ 下半 SWD 訊號品質即時波形。
@@ -507,13 +526,14 @@ async fn oled_task(mut dbg: display::DebugOled, mut led: Output<'static>) {
         } else {
             let _ = write!(l_scale, "no signal  clk --");
         }
-        dbg.status_logic(
-            &[l_chip.as_str(), l_flash.as_str()],
-            &clk,
-            &dio,
+        dbg.render(&display::OledModel {
+            chip: l_chip.as_str(),
+            flash: l_flash.as_str(),
+            clk,
+            dio,
             pos,
-            l_scale.as_str(),
-        );
+            scale: l_scale.as_str(),
+        });
         Timer::after(Duration::from_millis(250)).await;
     }
 }
