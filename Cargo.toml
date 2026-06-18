@@ -38,7 +38,17 @@ defmt-rtt = "1"
 panic-probe = { version = "1", features = ["print-defmt"] }
 
 [features]
-default = ["board-debug-probe"]
+default = ["board-debug-probe", "active-detect"]
+
+# 主動偵測 + OLED：core1 上的 OLED 狀態顯示、邏輯波形擷取，以及 dap_task 閒置時的
+# 自主 layer-2 晶片偵測。關掉(用 *-min 別名)→ 純 CMSIS-DAP/USB/UART 探針，core0 不主動碰 SWD，
+# 用來區隔「燒錄問題是否來自主動偵測/OLED 機制」。
+active-detect = []
+
+# 診斷用：即使 USB host 在線(插著 PC)也讓 OLED 自主偵測照跑。平常穩定版是「有 host 就不偵測」
+# (避免自主偵測在 host 兩次存取間清掉鏈路 → 不穩)。此 feature 用於「只看 OLED、不跑除錯工具」
+# 時，獨立判斷目標是否回應；**勿與 probe-rs/OpenOCD/usbipd-rs 同時使用**(會互相干擾)。
+force-detect = ["active-detect"]
 
 # 晶片選擇 (對應 C 的 PICO_BOARD / target)
 rp2040 = ["embassy-rp/rp2040"]

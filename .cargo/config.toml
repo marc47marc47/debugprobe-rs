@@ -29,8 +29,15 @@ DEFMT_LOG = "debug"
 # 三板建置別名（對應 C 版的 debugprobe.uf2 / _on_pico / _on_pico2）。
 # 產生 UF2：先 `cargo install elf2uf2-rs`，再對 ELF 執行 elf2uf2-rs（見 README）。
 [alias]
-build-probe = "build --release --no-default-features --features board-debug-probe"
-build-pico = "build --release --no-default-features --features board-pico"
-build-pico2 = "build --release --target thumbv8m.main-none-eabihf --no-default-features --features board-pico2"
+build-probe = "build --release --no-default-features --features board-debug-probe,active-detect"
+build-pico = "build --release --no-default-features --features board-pico,active-detect"
+build-pico2 = "build --release --target thumbv8m.main-none-eabihf --no-default-features --features board-pico2,active-detect"
+# 最小診斷版：無 OLED、無 core1、無韌體主動偵測 → 純 CMSIS-DAP/USB/UART 探針。
+# 用來區隔燒錄問題是否來自主動偵測機制（若 -min 能燒、完整版不能 → 問題在偵測）。
+build-probe-min = "build --release --no-default-features --features board-debug-probe"
+build-pico-min = "build --release --no-default-features --features board-pico"
+build-pico2-min = "build --release --target thumbv8m.main-none-eabihf --no-default-features --features board-pico2"
+# 診斷版：插著 PC 也讓 OLED 自主偵測照跑（只看 OLED、勿同時跑除錯工具）。
+build-pico-diag = "build --release --no-default-features --features board-pico,force-detect"
 # 透過 SWD 燒錄器直接燒錄 + RTT log（需 probe-rs）。
-run-probe = "run --release --no-default-features --features board-debug-probe"
+run-probe = "run --release --no-default-features --features board-debug-probe,active-detect"

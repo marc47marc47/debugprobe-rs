@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>接線圖：RP2040 (Pico) 探針 → STM32F103 (Blue Pill)</title>
+<style>
+  body { font-family:"Segoe UI","Microsoft JhengHei",system-ui,sans-serif; max-width:1080px;
+         margin:24px auto; padding:0 16px; color:#1c1e21; line-height:1.6; background:#fff; }
+  h1 { border-bottom:3px solid #2a7; padding-bottom:6px; }
+  h2 { margin-top:28px; border-left:5px solid #2a7; padding-left:10px; }
+  table { border-collapse:collapse; width:100%; margin:10px 0; }
+  th,td { border:1px solid #ccd; padding:6px 10px; font-size:14px; text-align:left; }
+  th { background:#eef6f1; }
+  code { background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:13px; }
+  .sw{color:#e8820c;font-weight:bold} .dio{color:#1ba01b;font-weight:bold}
+  .pw{color:#d12b2b;font-weight:bold} .gd{color:#444;font-weight:bold}
+  .warn{background:#fff6e5;border-left:5px solid #e9a100;padding:10px 14px;border-radius:4px}
+  figcaption{color:#667;font-size:13px;margin-top:4px}
+  svg{background:#fafcff;border:1px solid #e3e8ee;border-radius:6px}
+</style>
+</head>
+<body>
+
+<h1>接線圖：RP2040 (Pico) 探針 → STM32F103 (Blue Pill)</h1>
+<p>探針端為 <b>board-pico</b>（SWCLK=GP2、SWDIO=GP3）。腳位依實際 pinout 標示。
+<b>建議單電源</b>：由 Pico 的 <span class="pw">3V3(pin36)</span> 供電給 Blue Pill → 一個地、最穩，避開多電源/接地迴路。</p>
+
+<figure>
+<svg viewBox="0 0 1040 820" xmlns="http://www.w3.org/2000/svg" font-family="Consolas,monospace" font-size="11">
+  <defs>
+    <marker id="ar" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#333"/></marker>
+  </defs>
+
+  <!-- ===== Pico 板 ===== -->
+  <rect x="170" y="80" width="140" height="640" rx="8" fill="#eef3fb" stroke="#37c" stroke-width="2"/>
+  <rect x="210" y="64" width="60" height="20" rx="3" fill="#aaa"/><text x="240" y="78" text-anchor="middle" fill="#fff" font-size="10">USB</text>
+  <text x="240" y="410" text-anchor="middle" font-weight="bold" fill="#37c" transform="rotate(-90 240 410)">Raspberry Pi Pico (RP2040) — 探針</text>
+
+  <!-- 左排 pin 1..20 -->
+  <!-- y = 96 + i*32 -->
+  <g text-anchor="end">
+    <text x="164" y="100">1  GP0</text>
+    <text x="164" y="132">2  GP1</text>
+    <text x="164" y="164" class="gd">3  GND ●</text>
+    <text x="164" y="196" class="sw">4  GP2 SWCLK ●</text>
+    <text x="164" y="228" class="dio">5  GP3 SWDIO ●</text>
+    <text x="164" y="260">6  GP4</text>
+    <text x="164" y="292">7  GP5</text>
+    <text x="164" y="324">8  GND</text>
+    <text x="164" y="356">9  GP6</text>
+    <text x="164" y="388">10 GP7</text>
+    <text x="164" y="420">11 GP8</text>
+    <text x="164" y="452">12 GP9</text>
+    <text x="164" y="484">13 GND</text>
+    <text x="164" y="516">14 GP10</text>
+    <text x="164" y="548">15 GP11</text>
+    <text x="164" y="580">16 GP12</text>
+    <text x="164" y="612">17 GP13</text>
+    <text x="164" y="644">18 GND</text>
+    <text x="164" y="676">19 GP14</text>
+    <text x="164" y="708">20 GP15</text>
+  </g>
+  <!-- 右排 pin 40..21 -->
+  <g text-anchor="start">
+    <text x="316" y="100">VBUS 40</text>
+    <text x="316" y="132">VSYS 39</text>
+    <text x="316" y="164">GND 38</text>
+    <text x="316" y="196">3V3EN 37</text>
+    <text x="316" y="228" class="pw">3V3 36 ●</text>
+    <text x="316" y="260">VREF 35</text>
+    <text x="316" y="292">GP28 34</text>
+    <text x="316" y="324">AGND 33</text>
+    <text x="316" y="356">GP27 32</text>
+    <text x="316" y="388">GP26 31</text>
+    <text x="316" y="420">RUN 30</text>
+    <text x="316" y="452">GP22 29</text>
+    <text x="316" y="484">GND 28</text>
+    <text x="316" y="516">GP21 27</text>
+    <text x="316" y="548">GP20 26</text>
+    <text x="316" y="580">GP19 25</text>
+    <text x="316" y="612">GP18 24</text>
+    <text x="316" y="644">GND 23</text>
+    <text x="316" y="676">GP17 22</text>
+    <text x="316" y="708">GP16 21</text>
+  </g>
+
+  <!-- ===== Blue Pill 板 ===== -->
+  <rect x="860" y="150" width="140" height="470" rx="8" fill="#fbf7fb" stroke="#a6a" stroke-width="2"/>
+  <rect x="905" y="134" width="50" height="18" rx="3" fill="#aaa"/><text x="930" y="147" text-anchor="middle" fill="#fff" font-size="9">USB-C</text>
+  <rect x="905" y="360" width="50" height="50" fill="#333"/><text x="930" y="389" text-anchor="middle" fill="#fff" font-size="9">F103</text>
+  <text x="930" y="600" text-anchor="middle" font-weight="bold" fill="#a6a" font-size="12">STM32F103 (Blue Pill)</text>
+  <!-- 左緣 4-pin SWD 排針（板端,面向 Pico）-->
+  <g text-anchor="start">
+    <circle cx="860" cy="260" r="5" class="pw" fill="#d12b2b"/><text x="872" y="264" class="pw">3V3</text>
+    <circle cx="860" cy="330" r="5" fill="#1ba01b"/><text x="872" y="334" class="dio">DIO (PA13)</text>
+    <circle cx="860" cy="400" r="5" fill="#e8820c"/><text x="872" y="404" class="sw">CLK (PA14)</text>
+    <circle cx="860" cy="470" r="5" fill="#444"/><text x="872" y="474" class="gd">GND</text>
+  </g>
+  <text x="930" y="640" text-anchor="middle" fill="#667" font-size="10">4-pin SWD 排針（板端）；順序依板上絲印</text>
+
+  <!-- ===== 連線 ===== -->
+  <!-- 3V3（紅）：Pico 右 pin36(310,224) → BluePill 3V3(860,260),走中間空隙 -->
+  <path d="M310,224 C 560,224 620,260 855,260" fill="none" stroke="#d12b2b" stroke-width="2.5" marker-end="url(#ar)"/>
+  <!-- GND（黑虛線）：Pico 左 pin3 → 下繞 → BluePill GND -->
+  <path d="M150,160 L134,160 L134,792 L808,792 L808,470 L855,470" fill="none" stroke="#444" stroke-width="2" stroke-dasharray="5 3" marker-end="url(#ar)"/>
+  <!-- SWCLK（橘）：Pico 左 pin4 → 下繞 → BluePill CLK，含 33Ω -->
+  <path d="M150,192 L150,760 L840,760 L840,400 L855,400" fill="none" stroke="#e8820c" stroke-width="2.5" marker-end="url(#ar)"/>
+  <rect x="470" y="752" width="26" height="16" fill="#fff" stroke="#e8820c"/><text x="483" y="764" text-anchor="middle" fill="#e8820c" font-size="10">33Ω</text>
+  <!-- SWDIO（綠）：Pico 左 pin5 → 下繞 → BluePill DIO，含 33Ω -->
+  <path d="M150,224 L142,224 L142,776 L824,776 L824,330 L855,330" fill="none" stroke="#1ba01b" stroke-width="2.5" marker-end="url(#ar)"/>
+  <rect x="560" y="768" width="26" height="16" fill="#fff" stroke="#1ba01b"/><text x="573" y="780" text-anchor="middle" fill="#1ba01b" font-size="10">33Ω</text>
+
+  <!-- 左排 pin 接點小柱（GND/CLK/DIO 引出左側）-->
+  <line x1="170" y1="160" x2="150" y2="160" stroke="#444" stroke-width="2"/>
+  <line x1="170" y1="192" x2="150" y2="192" stroke="#e8820c" stroke-width="2"/>
+  <line x1="170" y1="224" x2="150" y2="224" stroke="#1ba01b" stroke-width="2"/>
+
+  <!-- 圖例 -->
+  <g font-size="12">
+    <rect x="360" y="120" width="300" height="92" rx="6" fill="#fff" stroke="#ddd"/>
+    <text x="372" y="142"><tspan class="pw">━ 3V3 供電</tspan>　<tspan class="dio">━ SWDIO</tspan></text>
+    <text x="372" y="164"><tspan class="sw">━ SWCLK</tspan>　<tspan class="gd">┄ GND</tspan></text>
+    <text x="372" y="186" fill="#667">SWCLK/SWDIO 串 33Ω（探針端,選用,抑振鈴）</text>
+    <text x="372" y="204" fill="#667">NRST 不在 4-pin 排針；要硬重置才接（選用）</text>
+  </g>
+</svg>
+<figcaption>單電源接法：Pico 3V3(pin36) 供電給 Blue Pill；SWCLK=GP2(pin4)、SWDIO=GP3(pin5)、GND(pin3)。
+SWCLK/SWDIO 各串 33Ω（選用）。</figcaption>
+</figure>
+
+<h2>接線對照表</h2>
+<table>
+  <tr><th>訊號</th><th>Pico (RP2040) 腳</th><th>串接</th><th>STM32F103 (Blue Pill)</th></tr>
+  <tr><td class="pw">3V3 供電</td><td>3V3 OUT — <b>pin 36</b></td><td>—</td><td>3V3（SWD 排針）</td></tr>
+  <tr><td class="dio">SWDIO</td><td>GP3 — <b>pin 5</b></td><td>33Ω（選用）</td><td>DIO = <b>PA13</b></td></tr>
+  <tr><td class="sw">SWCLK</td><td>GP2 — <b>pin 4</b></td><td>33Ω（選用）</td><td>CLK = <b>PA14</b></td></tr>
+  <tr><td class="gd">GND</td><td>GND — <b>pin 3</b>（或 8/13/18/...）</td><td>—</td><td>GND</td></tr>
+  <tr><td>NRST（選用）</td><td>GP1 — pin 2</td><td>—</td><td>R / NRST（側邊排針,非 4-pin）</td></tr>
+</table>
+
+<h2>重點</h2>
+<div class="warn">
+<ol style="margin:6px 0">
+  <li><b>單電源最穩</b>：用 Pico 3V3(pin36) 供電給 Blue Pill → 一個地。<b>此時 Blue Pill 不要再插自己的 USB-C</b>（避免兩個電源/接地迴路,正是「2 線可、4 線不行」的元兇）。</li>
+  <li><b>要 Blue Pill 自供電（插它的 USB）時：不要接 Pico 3V3</b>，只接 SWCLK/SWDIO/GND；且確保**單一乾淨共地**、不形成迴路。</li>
+  <li><b>33Ω 串於 SWCLK/SWDIO（探針端）</b>：抑制杜邦線振鈴、限制突波（選用,接點差時很有幫助）。</li>
+  <li><b>訊號線不要加電容</b>（會拖慢邊緣、破壞 SWD）。</li>
+  <li><b>GND 先接、最後拔</b>，不要通電熱插拔 GND（會 latch-up / 當機）。</li>
+  <li>SWDIO=<b>PA13</b>、SWCLK=<b>PA14</b> 是 STM32F103 固定腳；Blue Pill 4-pin 排針順序依板上絲印（常見 3V3/DIO/CLK/GND）。</li>
+</ol>
+</div>
+
+<p style="color:#778;font-size:13px">韌體端已做自適應 SWCLK（1M→500k→250k→100k 自動降速配合線路）與 DPIDR 重試。詳見
+<a href="MULTI-TARGET.md">MULTI-TARGET.md</a>。</p>
+
+</body>
+</html>

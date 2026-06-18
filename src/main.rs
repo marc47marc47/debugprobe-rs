@@ -74,6 +74,12 @@ static TARGET_FLASH: AtomicU8 = AtomicU8::new(0xFF);
 /// 目標 JEP106 廠商碼（跨廠牌辨識）與廠商專屬 part（Nordic 等）。
 static TARGET_DESIGNER: AtomicU32 = AtomicU32::new(0);
 static TARGET_PART: AtomicU32 = AtomicU32::new(0);
+/// 自適應偵測實際採用的 SWCLK（kHz）；0 = 沒讀到（無目標）。供 OLED 第 5 行顯示。
+static USED_KHZ: AtomicU32 = AtomicU32::new(0);
+/// 連線品質（OLED 訊號儀）：每輪 16 次讀取中成功的次數。DP=短交易、AP=AHB 長交易（燒錄需要）。
+/// 使用者照這兩個數字接出最佳線路：AP 往 16 爬 = 訊號變好；DP16/AP0 穩定 = RDP1 而非 SI。
+static LINK_DP: AtomicU32 = AtomicU32::new(0);
+static LINK_AP: AtomicU32 = AtomicU32::new(0);
 
 /// SWD 數位邏輯波形 — **token ring（環形緩衝、捲動式）**：128 欄各 1 bit，兩通道(SWCLK/SWDIO)。
 /// 每輪擷取把新片段「推進」ring（最新覆蓋最舊、不積壓），OLED 由 POS 起讀（最舊→最新）→ 視覺流動。
@@ -157,107 +163,76 @@ fn evt_name(i: u32) -> &'static str {
     }
 }
 
-/// STM32/GD32 DBGMCU DEV_ID（12-bit）→ 晶片型號字串（供 OLED 顯示 layer 2 目標）。
-/// 涵蓋市面常見系列；GD32F1 與 STM32F1 共用 DEV_ID（0x410/0x414）故並列標示。
-fn chip_name(devid: u16) -> Option<&'static str> {
-    Some(match devid {
-        // F0
-        0x440 => "STM32F030/05x",
-        0x444 => "STM32F03x",
-        0x442 => "STM32F09x",
-        0x445 => "STM32F04x",
-        0x448 => "STM32F07x",
-        // F1 / GD32F1
-        0x410 => "STM32F1/GD32",
-        0x412 => "STM32F1 LD",
-        0x414 => "STM32F1/GD32 HD",
-        0x418 => "STM32F1 CL",
-        0x420 => "STM32F1 VL",
-        0x428 => "STM32F1 VL-HD",
-        0x430 => "STM32F1 XL",
-        // F2
-        0x411 => "STM32F2",
-        // F3
-        0x422 => "STM32F302/303",
-        0x432 => "STM32F37x",
-        0x438 => "STM32F334",
-        0x439 => "STM32F301/302",
-        0x446 => "STM32F303xE",
-        // F4
-        0x413 => "STM32F405/407",
-        0x419 => "STM32F42x/43x",
-        0x421 => "STM32F446",
-        0x423 => "STM32F401xBC",
-        0x431 => "STM32F411",
-        0x433 => "STM32F401xDE",
-        0x434 => "STM32F469/479",
-        0x441 => "STM32F412",
-        0x458 => "STM32F410",
-        0x463 => "STM32F413",
-        // F7
-        0x449 => "STM32F74x/75x",
-        0x451 => "STM32F76x/77x",
-        0x452 => "STM32F72x/73x",
-        // G0
-        0x456 => "STM32G05x/06x",
-        0x460 => "STM32G07x/08x",
-        0x466 => "STM32G03x/04x",
-        0x467 => "STM32G0Bx/0Cx",
-        // G4
-        0x468 => "STM32G431/441",
-        0x469 => "STM32G47x/48x",
-        0x479 => "STM32G491/4A1",
-        // L0
-        0x457 => "STM32L01x/02x",
-        0x425 => "STM32L031/041",
-        0x417 => "STM32L05x/06x",
-        0x447 => "STM32L07x/08x",
-        // L1
-        0x416 => "STM32L1 Cat1/2",
-        0x429 => "STM32L1 Cat2",
-        0x427 => "STM32L1 Cat3",
-        0x436 => "STM32L1 Cat4",
-        0x437 => "STM32L1 Cat5/6",
-        // L4 / L4+
-        0x415 => "STM32L4x5/x6",
-        0x435 => "STM32L43x/44x",
-        0x461 => "STM32L496/4A6",
-        0x462 => "STM32L45x/46x",
-        0x464 => "STM32L41x/42x",
-        0x470 => "STM32L4Rx/4Sx",
-        0x471 => "STM32L4Px/4Qx",
-        // L5
-        0x472 => "STM32L5",
-        // H7
-        0x450 => "STM32H74x/75x",
-        0x480 => "STM32H7Ax/7Bx",
-        0x483 => "STM32H72x/73x",
-        // WB / WL
-        0x494 => "STM32WB1x",
-        0x495 => "STM32WB55",
-        0x496 => "STM32WB35",
-        0x497 => "STM32WL5x/Ex",
-        // U5
-        0x482 => "STM32U575/585",
-        // C0
-        0x443 => "STM32C0",
-        0x453 => "STM32C0",
-        _ => return None,
-    })
+/// STM32/GD32 DBGMCU DEV_ID（12-bit）→ 晶片型號（供 OLED 顯示 layer 2 目標）。
+/// 查表式（`(dev_id, name)`）；涵蓋市面常見系列；GD32F1 與 STM32F1 共用 DEV_ID 故並列標示。
+static CHIP_NAMES: &[(u16, &str)] = &[
+    // F0
+    (0x440, "STM32F030/05x"), (0x444, "STM32F03x"), (0x442, "STM32F09x"),
+    (0x445, "STM32F04x"), (0x448, "STM32F07x"),
+    // F1 / GD32F1
+    (0x410, "STM32F1/GD32"), (0x412, "STM32F1 LD"), (0x414, "STM32F1/GD32 HD"),
+    (0x418, "STM32F1 CL"), (0x420, "STM32F1 VL"), (0x428, "STM32F1 VL-HD"), (0x430, "STM32F1 XL"),
+    // F2
+    (0x411, "STM32F2"),
+    // F3
+    (0x422, "STM32F302/303"), (0x432, "STM32F37x"), (0x438, "STM32F334"),
+    (0x439, "STM32F301/302"), (0x446, "STM32F303xE"),
+    // F4
+    (0x413, "STM32F405/407"), (0x419, "STM32F42x/43x"), (0x421, "STM32F446"),
+    (0x423, "STM32F401xBC"), (0x431, "STM32F411"), (0x433, "STM32F401xDE"),
+    (0x434, "STM32F469/479"), (0x441, "STM32F412"), (0x458, "STM32F410"), (0x463, "STM32F413"),
+    // F7
+    (0x449, "STM32F74x/75x"), (0x451, "STM32F76x/77x"), (0x452, "STM32F72x/73x"),
+    // G0
+    (0x456, "STM32G05x/06x"), (0x460, "STM32G07x/08x"), (0x466, "STM32G03x/04x"),
+    (0x467, "STM32G0Bx/0Cx"),
+    // G4
+    (0x468, "STM32G431/441"), (0x469, "STM32G47x/48x"), (0x479, "STM32G491/4A1"),
+    // L0
+    (0x457, "STM32L01x/02x"), (0x425, "STM32L031/041"), (0x417, "STM32L05x/06x"),
+    (0x447, "STM32L07x/08x"),
+    // L1
+    (0x416, "STM32L1 Cat1/2"), (0x429, "STM32L1 Cat2"), (0x427, "STM32L1 Cat3"),
+    (0x436, "STM32L1 Cat4"), (0x437, "STM32L1 Cat5/6"),
+    // L4 / L4+
+    (0x415, "STM32L4x5/x6"), (0x435, "STM32L43x/44x"), (0x461, "STM32L496/4A6"),
+    (0x462, "STM32L45x/46x"), (0x464, "STM32L41x/42x"), (0x470, "STM32L4Rx/4Sx"),
+    (0x471, "STM32L4Px/4Qx"),
+    // L5
+    (0x472, "STM32L5"),
+    // H7
+    (0x450, "STM32H74x/75x"), (0x480, "STM32H7Ax/7Bx"), (0x483, "STM32H72x/73x"),
+    // WB / WL
+    (0x494, "STM32WB1x"), (0x495, "STM32WB55"), (0x496, "STM32WB35"), (0x497, "STM32WL5x/Ex"),
+    // U5
+    (0x482, "STM32U575/585"),
+    // C0
+    (0x443, "STM32C0"), (0x453, "STM32C0"),
+];
+
+/// JEP106 廠商碼 → 廠商名（非 ST/GD32 目標,至少顯示廠商）。查表式。
+static VENDOR_NAMES: &[(u16, &str)] = &[
+    (dap::JEP_ST, "STMicro"),
+    (0x23B, "ARM"),
+    (dap::JEP_NORDIC, "Nordic"),
+    (dap::JEP_RASPI, "RaspberryPi"),
+    (0x015, "NXP"),
+    (0x00E, "NXP"),
+    (0x017, "TI"),
+    (0x01F, "Microchip"),
+];
+
+/// 在 `(key, name)` 查表中線性搜尋。
+fn lookup(table: &[(u16, &'static str)], key: u16) -> Option<&'static str> {
+    table.iter().find(|&&(k, _)| k == key).map(|&(_, name)| name)
 }
 
-/// JEP106 廠商碼 → 廠商名（非 ST/GD32 目標,至少顯示廠商）。
+fn chip_name(devid: u16) -> Option<&'static str> {
+    lookup(CHIP_NAMES, devid)
+}
+
 fn vendor_name(designer: u16) -> Option<&'static str> {
-    Some(match designer {
-        dap::JEP_ST => "STMicro",
-        0x23B => "ARM",
-        dap::JEP_NORDIC => "Nordic",
-        dap::JEP_RASPI => "RaspberryPi",
-        0x015 | 0x00E => "NXP",
-        0x017 => "TI",
-        0x01F => "Microchip",
-        _ => return None,
-    })
+    lookup(VENDOR_NAMES, designer)
 }
 
 /// 跑 USB 裝置主迴圈（對應 C 的 usb_thread / tud_task）。
@@ -269,6 +244,8 @@ async fn usb_task(mut device: UsbDevice<'static, usbdev::ProbeDriver>) {
 /// CMSIS-DAP v2 傳輸 task：讀 bulk OUT → 處理 → 寫 bulk IN
 /// （對應 C 的 dap_thread + tusb_edpt_handler）。
 #[embassy_executor::task]
+// 最小診斷版（無 active-detect）：cap/absent/sticky_khz 不使用，僅作純指令轉發。
+#[cfg_attr(not(feature = "active-detect"), allow(unused_variables, unused_mut))]
 async fn dap_task(
     mut transport: usbdev::DapTransport,
     mut dap: dap::Dap<'static>,
@@ -278,12 +255,14 @@ async fn dap_task(
     let mut bulk_req = [0u8; 64];
     let mut hid_req = [0u8; 64];
     let mut resp = [0u8; 64];
+    #[cfg(feature = "active-detect")]
     let mut absent: u32 = 0; // 連續取樣不到次數（拔除 hysteresis）
+    #[cfg(feature = "active-detect")]
+    let mut sticky_khz: u32 = 1000; // 黏著速率：鎖在上次能通的 SWCLK，避免每輪重掃造成顯示亂跳
 
-    // FAST：無 USB host（未列舉）時的取樣節奏。
-    // SLOW：有 host 時，需「連續 SLOW 無 DAP 指令」才插入一次擷取——指令密集的偵錯
-    //       (間隔 < SLOW) 根本不會觸發擷取，故不干擾；只在 host 空閒時更新波形。
-    //       設短一點 → 插在 PC 上時波形更新更即時（原本 2s 會讓波形看起來延遲）。
+    // FAST：無 USB host（未列舉）時的取樣節奏（每 FAST 即進行一次自主偵測）。
+    // SLOW：有 host 時的指令等待逾時。host 在線時**一律不**插入自主偵測（讓出 SWD 給除錯器，
+    //       避免 line reset/掃頻/改寫 DP 暫存器在 host 兩次存取間清掉鏈路狀態 → 不穩定）。
     const FAST: Duration = Duration::from_millis(250);
     const SLOW: Duration = Duration::from_millis(300);
     loop {
@@ -313,7 +292,14 @@ async fn dap_task(
                         let _ = transport.hid_writer.write(&resp).await;
                         false
                     }
-                    Either3::Third(()) => true, // host 已連線但閒置
+                    // host 已連線但閒置：
+                    // - 正常(穩定)版：**一律不偵測**。自主偵測會做 line reset + 掃頻 + 改寫 DP
+                    //   SELECT/CTRL-STAT，在 host 兩次存取間清掉鏈路 → 忽好忽壞。host 在線時讓出 SWD。
+                    // - force-detect 診斷版：插著 PC 也偵測(僅供「只看 OLED、不跑除錯工具」獨立判斷目標)。
+                    #[cfg(feature = "force-detect")]
+                    Either3::Third(()) => true,
+                    #[cfg(not(feature = "force-detect"))]
+                    Either3::Third(()) => false,
                     _ => false,
                 }
             }
@@ -321,44 +307,70 @@ async fn dap_task(
             Either::Second(()) => true,
         };
 
-        // 閒置（含無 USB 連線）：擷取 SWD 數位邏輯波形 + 偵測晶片。
-        if idle {
-            // 擷取前把 SWCLK 固定為 1MHz（不管 host/usbipd 之前設過什麼），波形刻度才一致；之後還原。
-            let saved_khz = dap.swclk_khz();
-            dap.set_swclk_khz(1000);
-            // 喚醒 SWD → 啟動 PIO0 SM1+DMA 擷取 → 一次 DPIDR 讀（訊號刺激 + 在不在偵測）。
-            dap.swd_wakeup().await;
-            let mut buf = [0u32; logic::CAP_WORDS];
-            cap.start();
-            let xfer = cap.dma_into(&mut buf);
-            let present = dap.swd_read_dpidr().await;
-            let _ = select(xfer, Timer::after(Duration::from_millis(20))).await; // 等 DMA 或逾時
-            cap.stop();
-            dap.set_swclk_khz(saved_khz); // 還原 host 設定
+        // 最小診斷版：不做任何主動 SWD 動作（core0 僅轉發 host 指令）。
+        #[cfg(not(feature = "active-detect"))]
+        let _ = idle;
 
-            if present {
-                // 目標有回應才推進波形（SWCLK 由探針驅動、永遠在，故以實際回應為準）。
-                push_wave(&buf);
-                absent = 0;
-                if TARGET_DEVID.load(Ordering::Relaxed) & DEVID_VALID == 0 {
-                    if let Some(info) = dap.detect_target().await {
-                        TARGET_DESIGNER.store(info.designer as u32, Ordering::Relaxed);
-                        TARGET_PART.store(info.part, Ordering::Relaxed);
-                        TARGET_FLASH.store(info.rdp, Ordering::Relaxed);
-                        // TARGET_DEVID 最後寫（含 valid 旗標，OLED 以它判斷有無目標）。
-                        TARGET_DEVID.store(DEVID_VALID | info.devid as u32, Ordering::Relaxed);
+        // 閒置（含無 USB 連線）：擷取 SWD 數位邏輯波形 + 偵測晶片。
+        #[cfg(feature = "active-detect")]
+        if idle {
+            let saved_khz = dap.swclk_khz();
+            // 自適應 SWCLK（黏著 + 遲滯）：先試上次能通的速率；通過就維持（顯示穩定不亂跳）。
+            // 只有黏著速率失敗時，才由快到慢重掃並鎖到新的可用速率（訊號微弱時自動降速配合）。
+            // 先試單一 DP（STM32 等），再試 RP2040/RP2350 multidrop（swd_select_rp）。
+            let mut used = 0u32;
+            dap.set_swclk_khz(sticky_khz);
+            dap.swd_wakeup().await;
+            if dap.swd_read_dpidr().await || dap.swd_select_rp().await {
+                used = sticky_khz;
+            } else {
+                for &khz in &[1000u32, 500, 250, 100] {
+                    dap.set_swclk_khz(khz);
+                    dap.swd_wakeup().await;
+                    if dap.swd_read_dpidr().await || dap.swd_select_rp().await {
+                        used = khz;
+                        sticky_khz = khz; // 鎖定新速率
+                        break;
                     }
                 }
+            }
+            USED_KHZ.store(used, Ordering::Relaxed);
+
+            let mut buf = [0u32; logic::CAP_WORDS];
+            if used != 0 {
+                // 以可用速率擷取波形（再讀一次 DPIDR 當訊號刺激）。
+                cap.start();
+                let xfer = cap.dma_into(&mut buf);
+                let _ = dap.swd_read_dpidr().await;
+                let _ = select(xfer, Timer::after(Duration::from_millis(20))).await;
+                cap.stop();
+                push_wave(&buf);
+                absent = 0;
+                if TARGET_DEVID.load(Ordering::Relaxed) & DEVID_VALID == 0
+                    && let Some(info) = dap.detect_target().await
+                {
+                    TARGET_DESIGNER.store(info.designer as u32, Ordering::Relaxed);
+                    TARGET_PART.store(info.part, Ordering::Relaxed);
+                    TARGET_FLASH.store(info.rdp.to_u8(), Ordering::Relaxed);
+                    // TARGET_DEVID 最後寫（含 valid 旗標，OLED 以它判斷有無目標）。
+                    TARGET_DEVID.store(DEVID_VALID | info.devid as u32, Ordering::Relaxed);
+                }
+                // 連線品質量測（每輪）→ OLED 訊號儀，讓使用者照數字接出最佳線路。
+                let (dp_ok, ap_ok) = dap.link_quality().await;
+                LINK_DP.store(dp_ok as u32, Ordering::Relaxed);
+                LINK_AP.store(ap_ok as u32, Ordering::Relaxed);
             } else {
                 // 無回應（拔線/無目標）→ 推進平線,平段捲入畫面反映「沒訊號」。
                 push_flat();
-                // 連續 2 次量不到才視為拔除（hysteresis 防單次漏讀閃爍）。
                 absent += 1;
+                LINK_DP.store(0, Ordering::Relaxed);
+                LINK_AP.store(0, Ordering::Relaxed);
                 if absent >= 2 {
                     TARGET_DEVID.store(0, Ordering::Relaxed);
                     TARGET_FLASH.store(0xFF, Ordering::Relaxed);
                 }
             }
+            dap.set_swclk_khz(saved_khz); // 還原 host 設定
         }
     }
 }
@@ -405,20 +417,23 @@ async fn oled_task(mut dbg: display::DebugOled, mut led: Output<'static>) {
         // 第 3 行：可燒錄狀態（依 RDP 讀保護等級）；無目標則空白。
         let mut l_flash: heapless::String<21> = heapless::String::new();
         if dv & DEVID_VALID != 0 {
-            let s = match TARGET_FLASH.load(Ordering::Relaxed) {
-                0 => "flash OK (RDP0)",
-                1 => "flash LOCK(RDP1)",
-                2 => "flash RDP2 dead",
-                _ => "flash unknown",
-            };
-            let _ = write!(l_flash, "{}", s);
+            let level = dap::RdpLevel::from_u8(TARGET_FLASH.load(Ordering::Relaxed));
+            let _ = write!(l_flash, "{}", level.label());
         }
         let clk = load_wave(&WAVE_RING_CLK);
         let dio = load_wave(&WAVE_RING_DIO);
         let pos = WAVE_POS.load(Ordering::Relaxed) as usize;
-        // 第 5 行刻度：每欄時間（取樣週期）+ 擷取用的固定 SWCLK（1MHz）。
+        // 第 5 行：連線品質訊號儀 — DP(短交易) / AP(AHB 長交易,燒錄需要) 各 /16 + 鎖定 SWCLK。
+        // 接線時看這行：AP 往 16 爬 = 訊號變好；DP16/AP0 穩定 = RDP1 讀保護(非 SI)。
         let mut l_scale: heapless::String<21> = heapless::String::new();
-        let _ = write!(l_scale, "{}ns/col SWCLK 1M", logic::sample_ns());
+        let used = USED_KHZ.load(Ordering::Relaxed);
+        if used > 0 {
+            let dp = LINK_DP.load(Ordering::Relaxed);
+            let ap = LINK_AP.load(Ordering::Relaxed);
+            let _ = write!(l_scale, "DP{}/16 AP{}/16 {}k", dp, ap, used);
+        } else {
+            let _ = write!(l_scale, "no signal  clk --");
+        }
         dbg.status_logic(
             &[l_chip.as_str(), l_flash.as_str()],
             &clk,
@@ -434,12 +449,16 @@ async fn oled_task(mut dbg: display::DebugOled, mut led: Output<'static>) {
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
 
-    // --- OLED 除錯顯示（I2C1: SCL=GP7, SDA=GP6）---
-    let mut i2c_cfg = embassy_rp::i2c::Config::default();
-    i2c_cfg.frequency = 400_000; // 400kHz fast-mode，縮短 flush 時間
-    let i2c = embassy_rp::i2c::I2c::new_blocking(p.I2C1, p.PIN_7, p.PIN_6, i2c_cfg);
-    let mut dbg = display::DebugOled::new(i2c);
-    dbg.status(&["debugprobe-rs", "booting..."]);
+    // --- OLED 除錯顯示（I2C1: SCL=GP7, SDA=GP6）---（最小診斷版省略）
+    #[cfg(feature = "active-detect")]
+    let dbg = {
+        let mut i2c_cfg = embassy_rp::i2c::Config::default();
+        i2c_cfg.frequency = 400_000; // 400kHz fast-mode，縮短 flush 時間
+        let i2c = embassy_rp::i2c::I2c::new_blocking(p.I2C1, p.PIN_7, p.PIN_6, i2c_cfg);
+        let mut dbg = display::DebugOled::new(i2c);
+        dbg.status(&["debugprobe-rs", "booting..."]);
+        dbg
+    };
 
     // --- 序號（flash unique ID / OTP chip id）---
     static SERIAL: StaticCell<serial::SerialString> = StaticCell::new();
@@ -497,24 +516,28 @@ async fn main(spawner: Spawner) {
     let dap = dap::Dap::new(probe, serial.as_str());
     spawner.spawn(dap_task(dap_transport, dap, cap).unwrap());
 
-    // --- 存活指示 LED（對應 C 的 PROBE_USB_CONNECTED_LED）---
-    #[cfg(feature = "board-debug-probe")]
-    let led = Output::new(p.PIN_2, Level::Low);
-    #[cfg(any(feature = "board-pico", feature = "board-pico2"))]
-    let led = Output::new(p.PIN_25, Level::Low);
-
     // --- 多核心 affinity：OLED+LED → core1；core0 留 USB/DAP/UART/AutoBaud ---
     // core1 的 blocking I2C flush 不影響 core0；stack 放大到 32KB 排除溢位。
-    static mut CORE1_STACK: Stack<32768> = Stack::new();
-    static EXECUTOR1: StaticCell<Executor> = StaticCell::new();
-    spawn_core1(
-        p.CORE1,
-        unsafe { &mut *core::ptr::addr_of_mut!(CORE1_STACK) },
-        move || {
-            let executor1 = EXECUTOR1.init(Executor::new());
-            executor1.run(|s| s.spawn(oled_task(dbg, led).unwrap()));
-        },
-    );
+    // 最小診斷版（無 active-detect）：不啟 core1、不點 LED、不跑 OLED。
+    #[cfg(feature = "active-detect")]
+    {
+        // --- 存活指示 LED（對應 C 的 PROBE_USB_CONNECTED_LED）---
+        #[cfg(feature = "board-debug-probe")]
+        let led = Output::new(p.PIN_2, Level::Low);
+        #[cfg(any(feature = "board-pico", feature = "board-pico2"))]
+        let led = Output::new(p.PIN_25, Level::Low);
+
+        static mut CORE1_STACK: Stack<32768> = Stack::new();
+        static EXECUTOR1: StaticCell<Executor> = StaticCell::new();
+        spawn_core1(
+            p.CORE1,
+            unsafe { &mut *core::ptr::addr_of_mut!(CORE1_STACK) },
+            move || {
+                let executor1 = EXECUTOR1.init(Executor::new());
+                executor1.run(|s| s.spawn(oled_task(dbg, led).unwrap()));
+            },
+        );
+    }
 
     // 重要：core0 的 main task 必須**不返回**。實測若 spawn_core1 後讓 main 返回，
     // core0 的 DAP AP 存取會一致失敗（DP 可讀、AP 壞）；park 住 main 即正常。

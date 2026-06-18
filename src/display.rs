@@ -46,7 +46,9 @@ impl DebugOled {
             let _ = Text::with_baseline(line, Point::new(0, y), style, Baseline::Top).draw(o);
             y += 12;
         }
-        let _ = o.flush();
+        if o.flush().is_err() {
+            let _ = o.init();
+        }
     }
 
     /// SWD 數位邏輯波形顯示（2 通道方波,像邏輯示波器；token-ring 捲動）：
@@ -99,6 +101,9 @@ impl DebugOled {
         }
         // 第 5 行：刻度（y=53）。
         let _ = Text::with_baseline(scale, Point::new(0, 53), text, Baseline::Top).draw(o);
-        let _ = o.flush();
+        // flush 失敗（如 GND 熱拔造成 I2C 突波/SSD1306 異常）→ 重新 init，使 OLED 自癒。
+        if o.flush().is_err() {
+            let _ = o.init();
+        }
     }
 }

@@ -255,6 +255,56 @@
 
 ---
 
+## Phase 12 — 全面重構：struct / enum 型別化（不改行為，逐階段編譯驗證）
+
+把散落的魔術常數、`u8` 旗標、跨 task atomics 收斂成**型別安全的 struct / enum**，提升可讀性與正確性。
+原則：**每個子階段獨立**完成 → `cargo build-pico` + `clippy` 零警告 + **不改外部行為**（OLED 顯示、DAP
+協定、SWD 時序皆不變）→ 才進下一階段；完成把 `- [ ]` 改 `- [x]`。
+
+> 進行中以本節為單一事實來源。重構過程的 UF2 仍用 `flash.sh pico` / `pico-min` / `pico-diag`。
+
+### Phase 12.1 — DAP 指令與 SWD 傳輸型別化（`src/dap/mod.rs`）✅
+- [x] `enum Ack { Ok, Wait, Fault, Parity, Protocol }`（`from_swd(u8)→Ack` / `to_byte()→u8`）取代
+      `ACK_OK/ACK_WAIT/ACK_FAULT/ACK_ERROR` 裸值；`swd_transfer`/`transfer_retry` 回傳改 `Ack`
+- [x] `const fn swd_req(ap, rnw, a23)` + 具名請求常數 `DP_DPIDR_RD/DP_ABORT_WR/DP_CTRLSTAT_WR/RD/
+      DP_SELECT_WR/DP_RDBUFF_RD/AP_CSW_WR/AP_TAR_WR/AP_DRW_RD` 取代散落的 `0x02/0x00/0x08/...` 魔術數
+- [x] `enum DapCmd`（`from_u8(u8)→Option` / `name()`）取代 `ID_DAP_*` 常數；`cmd_name` 與
+      `execute_command` 都改用 `DapCmd`（dispatch 以 let-else + 列舉 match，無 catch-all 魔術）
+- [x] 順手清除 dead code（`swd_health`/`probe_lines`）；修 clippy（collapsible_if / doc 縮排）
+- [x] 驗證：`cargo build-pico`(active) + `clippy` **零警告**；probe/pico2/diag 全板建置通過；行為不變
+- 註：`-min`（active-detect 關閉）仍有「gated-out 程式碼的 unused import/static」既有警告 → 留待 Phase 12.3/12.5
+      把跨 task 狀態與 imports 一併 cfg 化時消除
+
+### Phase 12.2 — 目標識別型別化（`src/dap/mod.rs` + `src/main.rs`）✅
+- [x] `pub enum RdpLevel { Open, Level1, Level2, Unknown }` + `to_u8`/`from_u8`/`label()`；
+      取代 `rdp: u8` 的 0/1/2/0xFF；`read_rdp` 回 `RdpLevel`；`TargetInfo.rdp: RdpLevel`；
+      OLED「可燒狀態」字串集中到 `RdpLevel::label()`（取代 oled_task 內的 match）
+- [x] `chip_name`/`vendor_name` 收斂成 `static CHIP_NAMES/VENDOR_NAMES: &[(u16, &str)]` + 共用 `lookup()` 線性查找
+- [x] 驗證：active build + clippy **零警告**；probe/pico2/diag 全板建置通過；行為不變
+- 註：`MultidropId` enum 暫不做——目前只用 RP2040 core0 一個目標，`TARGETSEL_RP_CORE0` 已是具名常數、
+      非魔術數，單一變體 enum 反而多餘；待支援 RP2350 / core1 多目標時再列舉
+
+### Phase 12.3 — 跨 task 共享狀態型別化（`src/main.rs`）
+- [ ] `struct TargetShared`：收斂 `TARGET_DEVID/DESIGNER/PART/FLASH/USED_KHZ/LINK_DP/LINK_AP` 等 atomics + `store_*`/`load_*`/`clear()` 方法（消除散落的 `Ordering::Relaxed` 與 `DEVID_VALID` 旗標魔術）
+- [ ] `struct WaveRing`：收斂 `WAVE_RING_CLK/DIO` + `WAVE_POS` + `push_wave`/`push_flat`/`load`
+- [ ] `struct LinkQuality { dp: u8, ap: u8 }`（`dap.link_quality()` 回傳）
+- [ ] 驗證
+
+### Phase 12.4 — OLED 顯示模型型別化（`src/display.rs` + `src/main.rs`）
+- [ ] `struct OledModel { chip, flash, clk, dio, pos, scale }`：`oled_task` 組裝、`DebugOled` 繪製
+- [ ] `display.rs` 繪製收斂（`status` / `status_logic` 共用版面與 flush-自癒）
+- [ ] 驗證
+
+### Phase 12.5 — dap_task 偵測編排拆解（`src/main.rs`）
+- [ ] idle 偵測流程抽成獨立函式：自適應掃頻、波形擷取、晶片偵測、連線品質各自一個 fn
+- [ ] `enum SweepResult` / `enum LinkState` 表達偵測結果（取代散落 bool 與 `used==0`）
+- [ ] 驗證：三板 `build` + `clippy` 零警告
+
+### Phase 12.6 — 結果處置
+- [ ] 全部子階段完成 → 三板建置 + clippy 零警告 + 實機回歸（probe-rs info / OLED 偵測）→ commit + tag
+
+---
+
 ## 關鍵檔案（將新增 / 修改）
 
 - `Cargo.toml`（根目錄）— 改為 embedded no_std，加入 embassy 依賴與 features

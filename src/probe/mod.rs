@@ -99,12 +99,14 @@ impl<'d> Probe<'d> {
         // SWDIO 需有 pull-up，idle 為高。
         swdio.set_pull(Pull::Up);
 
-        // 長線杜邦訊號完整性：SWCLK/SWDIO 改弱驅動(2mA)+慢 slew，軟化邊緣、
-        // 大幅降低長線反射/振鈴（降 SWCLK 頻率無效，因頻率不影響邊緣速率）。
+        // 長線杜邦訊號完整性：drive 與 slew 是獨立旋鈕，兩者兼顧——
+        //   高電流(8mA)：撐住長線/電容負載下的邏輯準位（2mA 太弱 → 連 DP 都建不起來）。
+        //   慢 slew    ：軟化邊緣、抑制長線反射/振鈴（Fast 邊緣 → DP 過但密集 AP 序列位元錯誤）。
+        // 即「強而不陡」：訊號夠強又不振鈴，DP 與 AP 都穩。
         // 輸入端開 Schmitt 觸發抗雜訊，改善 SWDIO/SWDI 讀回穩定度。
-        swclk.set_drive_strength(Drive::_2mA);
+        swclk.set_drive_strength(Drive::_8mA);
         swclk.set_slew_rate(SlewRate::Slow);
-        swdio.set_drive_strength(Drive::_2mA);
+        swdio.set_drive_strength(Drive::_8mA);
         swdio.set_slew_rate(SlewRate::Slow);
         swdio.set_schmitt(true);
         if let Some(di) = &mut swdi {
