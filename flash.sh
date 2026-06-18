@@ -63,6 +63,15 @@ case "${1:-}" in
     ;;
   f401)            flash_stm32 stm32f401-target STM32F401CCUx ;;
   f446)            flash_stm32 stm32f446-target STM32F446RETx ;;
+  # 底層自測 ROM：把探針 GP2/GP3 當純 GPIO 輸出方波（繞過 PIO/SWD），驗 pad 死活（需 BOOTSEL）。
+  test-01-gp)
+    echo ">> build test_gp（GP2/GP3 方波自測）"
+    cargo build --release --no-default-features --features rp2040 --bin test_gp
+    echo ">> elf2uf2-rs → target/test_gp.uf2"
+    elf2uf2-rs target/thumbv6m-none-eabi/release/test_gp target/test_gp.uf2
+    echo ">> picotool load（探針需 BOOTSEL）"
+    picotool load -x target/test_gp.uf2
+    ;;
   *)
     echo "用法: ./flash.sh {pico|rp2040|probe|pico2|rp2350|pico-min|probe-min|pico-diag|f401|f446}"
     echo "  pico/rp2040  探針 RP2040 (board-pico) — 需 BOOTSEL"
@@ -71,6 +80,7 @@ case "${1:-}" in
     echo "  pico-min/probe-min  最小版（無 OLED/偵測，純 CMSIS-DAP）— 需 BOOTSEL"
     echo "  pico-diag    診斷版（插 PC 也自主偵測，只看 OLED 勿跑工具）— 需 BOOTSEL"
     echo "  f401/f446    layer-2 STM32 目標（經探針 SWD 燒錄）"
+    echo "  test-01-gp   探針 GP2/GP3 方波自測 ROM（驗 SWD pad 死活）— 需 BOOTSEL"
     echo "  PROBE_SERIAL=xxxx 覆蓋探針序號（預設 ${PROBE_SERIAL}）"
     exit 1
     ;;
