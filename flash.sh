@@ -67,6 +67,15 @@ case "${1:-}" in
   # SWDIO/SWCLK 邊緣計數診斷版（= pico-diag）：插 PC 也自主偵測，OLED 第 5 行顯示
   # 「Ce{SWCLK邊緣} De{SWDIO邊緣} {頻率}k」/「DP../AP../{速率}k」。需 BOOTSEL。
   test-01-swdio)   flash_rp2040 build-pico-diag test-01-swdio.uf2 ;;
+  # 直接燒任意現成的 .uf2 檔（不重建）：./flash.sh path/to/x.uf2（需 BOOTSEL）。
+  *.uf2)
+    if [ ! -f "$1" ]; then
+      echo "找不到檔案：$1" >&2
+      exit 1
+    fi
+    echo ">> picotool load「$1」（請確認 Pico 已在 BOOTSEL）"
+    picotool load -x "$1"
+    ;;
   *)
     echo "用法: ./flash.sh {pico|rp2040|probe|pico2|rp2350|pico-min|probe-min|pico-diag|f401|f446}"
     echo "  pico/rp2040  探針 RP2040 (board-pico) — 需 BOOTSEL"
@@ -76,6 +85,7 @@ case "${1:-}" in
     echo "  pico-diag    診斷版（插 PC 也自主偵測，只看 OLED 勿跑工具）— 需 BOOTSEL"
     echo "  f401/f446    layer-2 STM32 目標（經探針 SWD 燒錄）"
     echo "  test-01-swdio SWDIO/SWCLK 邊緣計數診斷版（OLED 第5行 Ce/De）— 需 BOOTSEL"
+    echo "  path/to/x.uf2 直接燒現成 .uf2 檔（不重建）— 需 BOOTSEL"
     echo "  PROBE_SERIAL=xxxx 覆蓋探針序號（預設 ${PROBE_SERIAL}）"
     exit 1
     ;;
