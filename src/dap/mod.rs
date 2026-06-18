@@ -735,22 +735,6 @@ impl<'d> Dap<'d> {
         self.probe.write_bits(32, 0xFFFF_FFFF).await; // 共 64 高，足夠
     }
 
-    /// dormant → SWD 喚醒序列（ADIv5 選擇警示序列）。multidrop DP(RP2040)需要此序列。
-    /// 8 高 → 128-bit selection alert(LSB-first) → 4 低 → 8-bit 啟用碼 0x1A。write_bits 為 LSB-first。
-    async fn swd_dormant_to_swd(&mut self) {
-        self.probe.write_bits(8, 0xFF).await; // >=8 cycles SWDIO 高
-        // 128-bit selection alert = 0x19BC0EA2_E3DDAFE9_86852D95_6209F392，LSB-first 位元組序：
-        const ALERT: [u8; 16] = [
-            0x92, 0xf3, 0x09, 0x62, 0x95, 0x2d, 0x85, 0x86, 0xe9, 0xaf, 0xdd, 0xe3, 0xa2, 0x0e,
-            0xbc, 0x19,
-        ];
-        for b in ALERT {
-            self.probe.write_bits(8, b as u32).await;
-        }
-        self.probe.write_bits(4, 0).await; // 4 cycles 低
-        self.probe.write_bits(8, 0x1A).await; // SWD 啟用碼 0x1A
-    }
-
     /// 寫 DP TARGETSEL（addr 0xC）：multidrop 選目標。**target 不驅動 ACK**，故忽略 ACK、照常送資料。
     async fn swd_write_targetsel(&mut self, id: u32) {
         // request: start=1 | APnDP=0 | RnW=0 | A2=1(bit3) | A3=1(bit4) | parity=0 | stop=0 | park=1 = 0x99
@@ -763,12 +747,12 @@ impl<'d> Dap<'d> {
         self.idle().await;
     }
 
-    /// 嘗試 RP2040/RP2350 multidrop 選核心（C：逐一試多個 TARGETSEL）：
-    /// 每個候選做 dormant→SWD + line reset + TARGETSEL + 讀 DPIDR；任一成功回 true。
+    /// 嘗試 RP2040/RP2350 multidrop 選核心（C：逐一試多個 TARGETSEL，reset 變體）：
+    /// 每個候選做 line reset + TARGETSEL + 讀 DPIDR；任一成功回 true。
+    /// **不送 dormant→SWD 序列**——RP 冷開機已在 SWD 態，line-reset+TARGETSEL 即可；
+    /// 而 dormant 序列會把非 dormant 的單核目標(STM32)誤切進 dormant 態，之後 JTAG-switch 喚不回。
     pub async fn swd_select_rp(&mut self) -> bool {
         for &id in &MULTIDROP_TARGETSEL {
-            self.line_reset().await;
-            self.swd_dormant_to_swd().await;
             self.line_reset().await;
             self.probe.write_bits(8, 0).await; // >=2 idle
             self.swd_write_targetsel(id).await;
@@ -779,20 +763,11 @@ impl<'d> Dap<'d> {
         false
     }
 
-    /// 多重喚醒（B）：依序試 (1) JTAG→SWD 切換序列、(2) dormant→SWD 選擇警示序列，
-    /// 各自接 line reset + 讀 DPIDR。任一讀到 DPIDR 回 true（單一 DP 目標）。
+    /// 喚醒單核 DP：JTAG→SWD 切換（0xE79E）+ line reset + 讀 DPIDR。讀到回 true。
+    /// 刻意**只用 JTAG-switch**（不送 dormant 序列，避免把單核目標誤推進 dormant 態）。
     async fn swd_connect(&mut self) -> bool {
-        // (1) JTAG-to-SWD 切換（0xE79E）
         self.line_reset().await;
         self.probe.write_bits(16, 0xE79E).await;
-        self.line_reset().await;
-        self.probe.write_bits(8, 0).await;
-        if self.swd_read_dpidr().await {
-            return true;
-        }
-        // (2) dormant→SWD（部分晶片開機在 dormant 態）
-        self.line_reset().await;
-        self.swd_dormant_to_swd().await;
         self.line_reset().await;
         self.probe.write_bits(8, 0).await;
         self.swd_read_dpidr().await
