@@ -90,6 +90,10 @@ struct TargetShared {
     /// 上一窗擷取的 SWCLK / SWDIO 邊緣(跳變)數。SWCLK 由探針自驅 → CLK e=0 即探針輸出死。
     clk_edges: AtomicU32,
     dio_edges: AtomicU32,
+    /// SM1 取樣:該窗 SWCLK / SWDIO 為高的取樣數(0..SAMPLES)。反映電位/duty:
+    /// 邊緣=0 且 高=滿 → 卡高;邊緣=0 且 高=0 → 卡低;邊緣多且 高≈半 → 正常 toggle。
+    clk_hi: AtomicU32,
+    dio_hi: AtomicU32,
 }
 
 impl TargetShared {
@@ -107,6 +111,8 @@ impl TargetShared {
             probe_khz: AtomicU32::new(0),
             clk_edges: AtomicU32::new(0),
             dio_edges: AtomicU32::new(0),
+            clk_hi: AtomicU32::new(0),
+            dio_hi: AtomicU32::new(0),
         }
     }
     /// 記錄掃頻目前嘗試的速率（kHz）。
@@ -116,15 +122,20 @@ impl TargetShared {
     fn probe_khz(&self) -> u32 {
         self.probe_khz.load(Ordering::Relaxed)
     }
-    /// 記錄上一窗 SWCLK / SWDIO 邊緣數。
-    fn set_edges(&self, clk: u32, dio: u32) {
-        self.clk_edges.store(clk, Ordering::Relaxed);
-        self.dio_edges.store(dio, Ordering::Relaxed);
+    /// 記錄上一窗 SWCLK/SWDIO 的邊緣數與高電位取樣數。
+    fn set_signal(&self, clk_e: u32, dio_e: u32, clk_hi: u32, dio_hi: u32) {
+        self.clk_edges.store(clk_e, Ordering::Relaxed);
+        self.dio_edges.store(dio_e, Ordering::Relaxed);
+        self.clk_hi.store(clk_hi, Ordering::Relaxed);
+        self.dio_hi.store(dio_hi, Ordering::Relaxed);
     }
-    fn edges(&self) -> (u32, u32) {
+    /// 回 (clk邊緣, dio邊緣, clk高取樣, dio高取樣)。
+    fn signal(&self) -> (u32, u32, u32, u32) {
         (
             self.clk_edges.load(Ordering::Relaxed),
             self.dio_edges.load(Ordering::Relaxed),
+            self.clk_hi.load(Ordering::Relaxed),
+            self.dio_hi.load(Ordering::Relaxed),
         )
     }
     /// 寫入偵測結果（designer/part/flash 先寫，devid 含有效旗標最後寫）。
@@ -504,8 +515,8 @@ async fn idle_scan(
     let _ = dap.swd_read_dpidr().await;
     let _ = select(xfer, Timer::after(Duration::from_millis(20))).await;
     cap.stop();
-    let (clk_e, dio_e) = count_edges(&buf);
-    TARGET.set_edges(clk_e, dio_e);
+    let (ce, de, ch, dh) = count_signal(&buf);
+    TARGET.set_signal(ce, de, ch, dh);
     WAVE.push(&buf);
 
     if used != 0 {
@@ -529,13 +540,13 @@ async fn idle_scan(
     dap.set_swclk_khz(saved_khz); // 還原 host 設定
 }
 
-/// 數擷取窗內 SWCLK / SWDIO 的跳變(邊緣)數。回 (clk_edges, dio_edges)。
-/// CLK 由探針自驅 → CLK 邊緣=0 代表探針沒驅動出 SWCLK(GP2 pad 死);
-/// CLK 邊緣>0 但 DIO 邊緣=0 → 探針有時脈、是目標/SWDIO 無回應。
+/// 數擷取窗內 SWCLK/SWDIO 的邊緣(跳變)數與高電位取樣數。回 (clk_e, dio_e, clk_hi, dio_hi)。
+/// CLK 由探針自驅 → CLK 邊緣=0 代表探針沒驅動出 SWCLK(GP2 pad 死);邊緣=0 配高取樣數可判卡高/卡低。
 #[cfg(feature = "active-detect")]
-fn count_edges(buf: &[u32]) -> (u32, u32) {
+fn count_signal(buf: &[u32]) -> (u32, u32, u32, u32) {
     let (mut pc, mut pd) = logic::sample_at(buf, 0);
     let (mut ce, mut de) = (0u32, 0u32);
+    let (mut ch, mut dh) = (pc as u32, pd as u32); // 取樣 0 的高電位計入
     for i in 1..logic::SAMPLES {
         let (c, d) = logic::sample_at(buf, i);
         if c != pc {
@@ -546,8 +557,14 @@ fn count_edges(buf: &[u32]) -> (u32, u32) {
             de += 1;
             pd = d;
         }
+        if c {
+            ch += 1;
+        }
+        if d {
+            dh += 1;
+        }
     }
-    (ce, de)
+    (ce, de, ch, dh)
 }
 
 /// OLED 顯示，跑在 **core1**：上 3 行文字（版本/晶片/可燒狀態）+ 下半 SWD 訊號品質即時波形。
@@ -590,10 +607,12 @@ async fn oled_task(mut dbg: display::DebugOled, mut led: Output<'static>) {
         } else {
             let _ = write!(l_chip, "no target");
         }
-        // 第 3 行：可燒錄狀態（依 RDP 讀保護等級）；無目標則空白。
+        // 第 2 行：可燒錄狀態（RDP）+ 頻率(append)；無目標則顯示探測頻率。
         let mut l_flash: heapless::String<21> = heapless::String::new();
         if valid {
-            let _ = write!(l_flash, "{}", TARGET.rdp().label());
+            let _ = write!(l_flash, "{} {}k", TARGET.rdp().label(), TARGET.used_khz());
+        } else {
+            let _ = write!(l_flash, "probe {}k", TARGET.probe_khz());
         }
         let clk = WAVE.load_clk();
         let dio = WAVE.load_dio();
@@ -604,12 +623,13 @@ async fn oled_task(mut dbg: display::DebugOled, mut led: Output<'static>) {
         let used = TARGET.used_khz();
         if used > 0 {
             let (dp, ap) = TARGET.link();
-            let _ = write!(l_scale, "DP{}/16 AP{}/16 {}k", dp, ap, used);
+            let _ = write!(l_scale, "DP{}/16 AP{}/16", dp, ap); // 頻率移到第 2 行
         } else {
-            // 無目標：顯示 SWCLK/SWDIO 邊緣數 + 探測頻率（診斷探針輸出死活）。
-            // Ce=0 → 探針沒驅出 SWCLK(GP2 死);Ce>0 De=0 → 有時脈、目標/SWDIO 無回應。
-            let (ce, de) = TARGET.edges();
-            let _ = write!(l_scale, "Ce{} De{} {}k", ce, de, TARGET.probe_khz());
+            // 無目標：SWCLK/SWDIO 邊緣數 + SM1 高電位佔比%（診斷探針輸出死活）。
+            // Ce=0 h100 → 卡高;Ce=0 h0 → 卡低;Ce 多 h≈50 → 正常 toggle。
+            let (ce, de, ch, dh) = TARGET.signal();
+            let s = logic::SAMPLES as u32;
+            let _ = write!(l_scale, "Ce{} De{} h{}/{}", ce, de, ch * 100 / s, dh * 100 / s);
         }
         dbg.render(&display::OledModel {
             chip: l_chip.as_str(),
