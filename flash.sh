@@ -23,8 +23,14 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-PROBE_SERIAL="${PROBE_SERIAL:-E6605838834DA330}"
-PROBE="2e8a:000c-0:${PROBE_SERIAL}"
+# 探針序號：優先用環境變數 PROBE_SERIAL；否則自動偵測目前連線的 RP2040 CMSIS-DAP 探針
+# （probe-rs list 第一顆 2e8a:000c）。兩顆探針互換時免得每次手動指定序號。
+if [ -n "${PROBE_SERIAL:-}" ]; then
+  PROBE="2e8a:000c-0:${PROBE_SERIAL}"
+else
+  PROBE="$(probe-rs list 2>/dev/null | grep -oE '2e8a:000c-0:[0-9A-Fa-f]+' | head -n1)" || true
+  [ -z "$PROBE" ] && PROBE="2e8a:000c-0:E6604430430F8B21"   # 後備預設
+fi
 
 # 探針(RP2040)：建置指定 cargo 別名 → 產生 UF2 → picotool 燒。$1=alias $2=uf2檔名
 flash_rp2040() {
