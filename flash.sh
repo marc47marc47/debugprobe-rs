@@ -10,6 +10,7 @@
 #   pico-diag        診斷版（插著 PC 也讓 OLED 自主偵測；只看 OLED、勿同時跑除錯工具）→ 需 BOOTSEL
 #   f401             layer-2 目標 stm32f401-target（經探針 probe-rs SWD 燒錄）
 #   f446             layer-2 目標 stm32f446-target（經探針 probe-rs SWD 燒錄）
+#   test-01-swdio    SWDIO/SWCLK 邊緣計數診斷版（= pico-diag，OLED 第5行 Ce/De）→ 需 BOOTSEL
 #
 # 環境變數:  PROBE_SERIAL=xxxx  覆蓋探針序號（預設見下）
 #
@@ -63,6 +64,9 @@ case "${1:-}" in
     ;;
   f401)            flash_stm32 stm32f401-target STM32F401CCUx ;;
   f446)            flash_stm32 stm32f446-target STM32F446RETx ;;
+  # SWDIO/SWCLK 邊緣計數診斷版（= pico-diag）：插 PC 也自主偵測，OLED 第 5 行顯示
+  # 「Ce{SWCLK邊緣} De{SWDIO邊緣} {頻率}k」/「DP../AP../{速率}k」。需 BOOTSEL。
+  test-01-swdio)   flash_rp2040 build-pico-diag test-01-swdio.uf2 ;;
   *)
     echo "用法: ./flash.sh {pico|rp2040|probe|pico2|rp2350|pico-min|probe-min|pico-diag|f401|f446}"
     echo "  pico/rp2040  探針 RP2040 (board-pico) — 需 BOOTSEL"
@@ -71,6 +75,7 @@ case "${1:-}" in
     echo "  pico-min/probe-min  最小版（無 OLED/偵測，純 CMSIS-DAP）— 需 BOOTSEL"
     echo "  pico-diag    診斷版（插 PC 也自主偵測，只看 OLED 勿跑工具）— 需 BOOTSEL"
     echo "  f401/f446    layer-2 STM32 目標（經探針 SWD 燒錄）"
+    echo "  test-01-swdio SWDIO/SWCLK 邊緣計數診斷版（OLED 第5行 Ce/De）— 需 BOOTSEL"
     echo "  PROBE_SERIAL=xxxx 覆蓋探針序號（預設 ${PROBE_SERIAL}）"
     exit 1
     ;;
