@@ -464,7 +464,8 @@ async fn dap_task(
 /// 之後連 line reset 都救不回 → 整顆 STM32 啞掉。故可偵測的單核目標一律走 single-drop。
 #[cfg(feature = "active-detect")]
 async fn adaptive_sweep(dap: &mut dap::Dap<'static>, sticky: &mut u32) -> u32 {
-    // 1) single-drop：先試黏著速率，再由快到慢掃（全程不寫 TARGETSEL，不會誤刪 DPv2 STM32）。
+    // 純 single-drop（只讀 DPIDR、**絕不寫 TARGETSEL**）：先試黏著速率，再由快到慢掃。
+    // 不做 multidrop——TARGETSEL 會把 DPv2 STM32 誤 deselect 且不可逆，整顆從此偵測不到。
     TARGET.set_probe_khz(*sticky);
     dap.set_swclk_khz(*sticky);
     dap.swd_wakeup().await;
@@ -477,15 +478,6 @@ async fn adaptive_sweep(dap: &mut dap::Dap<'static>, sticky: &mut u32) -> u32 {
         dap.swd_wakeup().await;
         if dap.swd_read_dpidr().await {
             *sticky = khz; // 鎖定新速率
-            return khz;
-        }
-    }
-    // 2) 單核完全無回應 → 才試 RP2040/RP2350 multidrop（會寫 TARGETSEL，故只當 last resort）。
-    for &khz in &[1000u32, 500, 250] {
-        TARGET.set_probe_khz(khz);
-        dap.set_swclk_khz(khz);
-        if dap.swd_select_rp().await {
-            *sticky = khz;
             return khz;
         }
     }

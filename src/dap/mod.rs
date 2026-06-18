@@ -221,14 +221,6 @@ pub const JEP_ST: u16 = 0x020; // STMicroelectronics（GD32 亦複製此 ROM tab
 pub const JEP_NORDIC: u16 = 0x244; // Nordic Semiconductor
 pub const JEP_RASPI: u16 = 0x493; // Raspberry Pi
 
-/// multidrop SWD TARGETSEL 候選（TINSTANCE<<28 | TARGETID）。aggressive：逐一試到通為止。
-/// RP2040 確定值；RP2350 為 best-effort（值不符只是 no-ack 失敗、無害，待實機確認）。
-const MULTIDROP_TARGETSEL: [u32; 4] = [
-    0x0100_2927, // RP2040 core0
-    0x1100_2927, // RP2040 core1
-    0x0004_0927, // RP2350 core0（best-effort）
-    0x1004_0927, // RP2350 core1（best-effort）
-];
 
 /// 讀保護（RDP）所在的 option 暫存器家族。各家族暫存器位址/格式不同。
 enum RdpReg {
@@ -735,34 +727,6 @@ impl<'d> Dap<'d> {
         self.probe.write_bits(32, 0xFFFF_FFFF).await; // 共 64 高，足夠
     }
 
-    /// 寫 DP TARGETSEL（addr 0xC）：multidrop 選目標。**target 不驅動 ACK**，故忽略 ACK、照常送資料。
-    async fn swd_write_targetsel(&mut self, id: u32) {
-        // request: start=1 | APnDP=0 | RnW=0 | A2=1(bit3) | A3=1(bit4) | parity=0 | stop=0 | park=1 = 0x99
-        let prq: u32 = 1 | (1 << 3) | (1 << 4) | (1 << 7);
-        self.probe.write_bits(8, prq).await;
-        let _ = self.probe.read_bits(self.turnaround + 3).await; // trn + ACK（忽略）
-        self.probe.hiz_clocks(self.turnaround).await; // trn 回主機
-        self.probe.write_bits(32, id).await; // 32-bit TARGETSEL
-        self.probe.write_bits(1, id.count_ones() & 1).await; // parity
-        self.idle().await;
-    }
-
-    /// 嘗試 RP2040/RP2350 multidrop 選核心（C：逐一試多個 TARGETSEL，reset 變體）：
-    /// 每個候選做 line reset + TARGETSEL + 讀 DPIDR；任一成功回 true。
-    /// **不送 dormant→SWD 序列**——RP 冷開機已在 SWD 態，line-reset+TARGETSEL 即可；
-    /// 而 dormant 序列會把非 dormant 的單核目標(STM32)誤切進 dormant 態，之後 JTAG-switch 喚不回。
-    pub async fn swd_select_rp(&mut self) -> bool {
-        for &id in &MULTIDROP_TARGETSEL {
-            self.line_reset().await;
-            self.probe.write_bits(8, 0).await; // >=2 idle
-            self.swd_write_targetsel(id).await;
-            if self.swd_read_dpidr().await {
-                return true;
-            }
-        }
-        false
-    }
-
     /// 喚醒單核 DP：JTAG→SWD 切換（0xE79E）+ line reset + 讀 DPIDR。讀到回 true。
     /// 刻意**只用 JTAG-switch**（不送 dormant 序列，避免把單核目標誤推進 dormant 態）。
     async fn swd_connect(&mut self) -> bool {
@@ -804,14 +768,9 @@ impl<'d> Dap<'d> {
     /// 自包含（含 line reset + JTAG→SWD 切換 + debug powerup + ACK 輪詢）；無目標/失敗回 None。
     /// 注意：會做 SWD line reset，故僅應在 host **未在使用 DAP** 時呼叫。
     pub async fn detect_target(&mut self) -> Option<TargetInfo> {
-        // B：多重喚醒（JTAG→SWD 切換、dormant→SWD）；皆失敗再試 RP multidrop（C）。
-        let mut is_rp = false;
+        // 喚醒：JTAG→SWD 切換 + 讀 DPIDR（single-drop）。不做 multidrop（避免 TARGETSEL 誤刪 DPv2 STM32）。
         if !self.swd_connect().await {
-            if self.swd_select_rp().await {
-                is_rp = true;
-            } else {
-                return None;
-            }
+            return None;
         }
         let _ = self.transfer_retry(DP_ABORT_WR, 0x1E).await; // DP ABORT：清 sticky error
         let _ = self.transfer_retry(DP_SELECT_WR, 0).await; // DP SELECT = 0（APSEL0, bank0）
@@ -830,19 +789,8 @@ impl<'d> Dap<'d> {
             return None;
         }
 
-        // A：CPUID 通用核心辨識（任何 Cortex-M 都讀得到）。所有路徑共用。
+        // A：CPUID 通用核心辨識（任何 Cortex-M 都讀得到）。
         let core = self.read_cpuid_part().await;
-
-        // RP2040/RP2350：無 STM32 DBGMCU，已由 multidrop 選到核心即視為偵測成功，回報 RaspberryPi。
-        if is_rp {
-            return Some(TargetInfo {
-                designer: JEP_RASPI,
-                devid: 0,
-                part: 0,
-                rdp: RdpLevel::Unknown,
-                core,
-            });
-        }
 
         // 跨廠牌辨識：先讀 CoreSight ROM table 的 JEP106 廠商碼（@0xE00FF000）。
         let designer = self.read_designer().await;
