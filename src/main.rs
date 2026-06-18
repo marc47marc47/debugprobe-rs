@@ -617,22 +617,21 @@ async fn oled_task(mut dbg: display::DebugOled, mut led: Output<'static>) {
         let clk = WAVE.load_clk();
         let dio = WAVE.load_dio();
         let pos = WAVE.pos();
-        // 左下角文字：偵測到時顯示連線品質 DP/AP；無目標則空白（訊號量在右側柱狀圖）。
+        // 左下角文字：SM1 取樣率（每欄時間）= 取樣層狀態。
         let mut l_scale: heapless::String<21> = heapless::String::new();
-        let used = TARGET.used_khz();
-        if used > 0 {
-            let (dp, ap) = TARGET.link();
-            let _ = write!(l_scale, "DP{}/16 AP{}/16", dp, ap);
-        }
-        // 右側柱狀圖：SWCLK/SWDIO 邊緣(Ce/De)與高電位佔比(hC/hD)。
-        // Ce0 hC0=卡低、Ce0 hC100=卡高、Ce 多 hC≈50=正常 toggle。
+        let _ = write!(l_scale, "{}ns/col", logic::sample_ns());
+        // 右側 6 條柱狀圖（含 line1/line2 右側）：訊號層 Ce/De/hC/hD + 連線層 DP/AP。
+        // Ce0 hC0=SWCLK卡低、Ce0 hC100=卡高、Ce 有長 hC≈50=正常 toggle；DP/AP 往滿=連線品質好。
         let (ce, de, ch, dh) = TARGET.signal();
+        let (dp, ap) = TARGET.link();
         let s = logic::SAMPLES as u32;
         let bars = [
             display::Bar { label: "Ce", value: ce, max: 64 },
             display::Bar { label: "De", value: de, max: 64 },
             display::Bar { label: "hC", value: ch * 100 / s, max: 100 },
             display::Bar { label: "hD", value: dh * 100 / s, max: 100 },
+            display::Bar { label: "DP", value: dp, max: 16 },
+            display::Bar { label: "AP", value: ap, max: 16 },
         ];
         dbg.render(&display::OledModel {
             chip: l_chip.as_str(),

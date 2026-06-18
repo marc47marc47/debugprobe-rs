@@ -117,13 +117,13 @@ impl DebugOled {
         // 左下角：連線品質文字 DP/AP（y=53）。
         let _ = Text::with_baseline(m.scale, Point::new(0, 53), text, Baseline::Top).draw(o);
 
-        // 右側柱狀圖面板（x=82..127）：每條 label(≤2字) + 長度 = value/max 的橫條。
+        // 右側柱狀圖面板（x=82..127，含 line1/line2 右側）：每條 label(≤2字) + 長度 = value/max 的橫條。
         const PANEL_X: i32 = 82;
         const BAR_X0: i32 = 96; // 條起點（label 後）
         const BAR_W: u32 = 30; // 條最大寬（96..126）
         let fill = PrimitiveStyle::with_fill(BinaryColor::On);
-        for (i, b) in m.bars.iter().take(4).enumerate() {
-            let y = 22 + i as i32 * 10;
+        for (i, b) in m.bars.iter().take(6).enumerate() {
+            let y = 2 + i as i32 * 10; // 6 條：y=2,12,22,32,42,52（用到右上 line1/line2 高度）
             let _ = Text::with_baseline(b.label, Point::new(PANEL_X, y - 1), text, Baseline::Top)
                 .draw(o);
             // 外框
