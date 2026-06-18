@@ -193,6 +193,14 @@ impl RdpLevel {
     }
 }
 
+/// 連線品質量測結果（OLED 訊號儀）：每輪 16 次讀取中成功的次數。
+pub struct LinkQuality {
+    /// DP（短交易）讀成功數 0..=16；訊號稍差也容易滿。
+    pub dp: u8,
+    /// AP（AHB 長交易，燒錄真正需要）讀成功數 0..=16；訊號變好時往 16 爬。
+    pub ap: u8,
+}
+
 /// 自動偵測到的目標資訊（供 OLED 顯示）。
 pub struct TargetInfo {
     /// CoreSight ROM table 的 JEP106 廠商碼（cc<<7|id）；0=未知。跨廠牌辨識用。
@@ -860,7 +868,7 @@ impl<'d> Dap<'d> {
     ///   若 `dp_ok=16` 但 `ap_ok=0` 且穩定 → 不是 SI，是 RDP1 讀保護（AHB 讀回 0）。
     ///
     /// 僅應在 host 未使用 DAP 時呼叫（會做 line reset）。
-    pub async fn link_quality(&mut self) -> (u8, u8) {
+    pub async fn link_quality(&mut self) -> LinkQuality {
         self.line_reset().await;
         self.probe.write_bits(16, 0xE79E).await;
         self.line_reset().await;
@@ -883,7 +891,7 @@ impl<'d> Dap<'d> {
             }
         }
         if dp_ok == 0 {
-            return (0, 0);
+            return LinkQuality { dp: 0, ap: 0 };
         }
 
         // debug powerup（同 detect_target）。
@@ -899,7 +907,7 @@ impl<'d> Dap<'d> {
             }
         }
         if !powered {
-            return (dp_ok, 0);
+            return LinkQuality { dp: dp_ok, ap: 0 };
         }
 
         // AP：連讀 16× DBGMCU_IDCODE @0xE0042000，非 0 且一致才算成功。
@@ -921,7 +929,7 @@ impl<'d> Dap<'d> {
                 ap_ok += 1;
             }
         }
-        (dp_ok, ap_ok)
+        LinkQuality { dp: dp_ok, ap: ap_ok }
     }
 
     /// 讀 CoreSight ROM table(0xE00FF000) 的 PIDR，取 JEP106 廠商碼（cc<<7|id）；失敗回 0。

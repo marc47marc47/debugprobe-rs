@@ -284,11 +284,14 @@
 - 註：`MultidropId` enum 暫不做——目前只用 RP2040 core0 一個目標，`TARGETSEL_RP_CORE0` 已是具名常數、
       非魔術數，單一變體 enum 反而多餘；待支援 RP2350 / core1 多目標時再列舉
 
-### Phase 12.3 — 跨 task 共享狀態型別化（`src/main.rs`）
-- [ ] `struct TargetShared`：收斂 `TARGET_DEVID/DESIGNER/PART/FLASH/USED_KHZ/LINK_DP/LINK_AP` 等 atomics + `store_*`/`load_*`/`clear()` 方法（消除散落的 `Ordering::Relaxed` 與 `DEVID_VALID` 旗標魔術）
-- [ ] `struct WaveRing`：收斂 `WAVE_RING_CLK/DIO` + `WAVE_POS` + `push_wave`/`push_flat`/`load`
-- [ ] `struct LinkQuality { dp: u8, ap: u8 }`（`dap.link_quality()` 回傳）
-- [ ] 驗證
+### Phase 12.3 — 跨 task 共享狀態型別化（`src/main.rs`）✅
+- [x] `struct TargetShared`（單一 `static TARGET`）：收斂 `devid/flash/designer/part/used_khz/link_dp/link_ap`
+      atomics + `store(&TargetInfo)`/`clear()`/`valid()`/`devid()`/`designer()`/`part()`/`rdp()`/
+      `set_used_khz()`/`used_khz()`/`set_link()`/`link()`（`VALID` 旗標封進關聯常數，消除散落魔術）
+- [x] `struct WaveRing`（單一 `static WAVE`）：收斂 clk/dio/pos + `push()`/`push_flat()`/`load_clk()`/
+      `load_dio()`/`pos()`（取代 free fn `ring_set`/`push_wave`/`push_flat`/`load_wave` 與 5 個裸 static）
+- [x] `pub struct LinkQuality { dp, ap }`（`dap.link_quality()` 回傳，取代 `(u8,u8)` tuple）
+- [x] 驗證：active build + clippy **零警告**；probe/pico2/diag/min 全變體建置通過；行為不變
 
 ### Phase 12.4 — OLED 顯示模型型別化（`src/display.rs` + `src/main.rs`）
 - [ ] `struct OledModel { chip, flash, clk, dio, pos, scale }`：`oled_task` 組裝、`DebugOled` 繪製

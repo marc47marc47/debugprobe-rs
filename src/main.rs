@@ -66,82 +66,164 @@ static EVT_RING: [AtomicU8; EVT_N] = [
 static EVT_SEQ: AtomicU32 = AtomicU32::new(0); // 單調寫入序號（單一寫入者 = dap_task）
 static UART_RX_BYTES: AtomicU32 = AtomicU32::new(0); // 目標→host（client log）
 static UART_TX_BYTES: AtomicU32 = AtomicU32::new(0); // host→目標
-/// layer 2 目標自動偵測結果：0 = 無/未偵測；否則 bit31=有效旗標 | 低 12 位 DEV_ID。
-static TARGET_DEVID: AtomicU32 = AtomicU32::new(0);
-const DEVID_VALID: u32 = 1 << 31;
-/// layer 2 目標可燒錄狀態（RDP 等級）：0=L0 可燒, 1=L1 需 unlock, 2=L2 鎖死, 0xFF=未知/無。
-static TARGET_FLASH: AtomicU8 = AtomicU8::new(0xFF);
-/// 目標 JEP106 廠商碼（跨廠牌辨識）與廠商專屬 part（Nordic 等）。
-static TARGET_DESIGNER: AtomicU32 = AtomicU32::new(0);
-static TARGET_PART: AtomicU32 = AtomicU32::new(0);
-/// 自適應偵測實際採用的 SWCLK（kHz）；0 = 沒讀到（無目標）。供 OLED 第 5 行顯示。
-static USED_KHZ: AtomicU32 = AtomicU32::new(0);
-/// 連線品質（OLED 訊號儀）：每輪 16 次讀取中成功的次數。DP=短交易、AP=AHB 長交易（燒錄需要）。
-/// 使用者照這兩個數字接出最佳線路：AP 往 16 爬 = 訊號變好；DP16/AP0 穩定 = RDP1 而非 SI。
-static LINK_DP: AtomicU32 = AtomicU32::new(0);
-static LINK_AP: AtomicU32 = AtomicU32::new(0);
-
-/// SWD 數位邏輯波形 — **token ring（環形緩衝、捲動式）**：128 欄各 1 bit，兩通道(SWCLK/SWDIO)。
-/// 每輪擷取把新片段「推進」ring（最新覆蓋最舊、不積壓），OLED 由 POS 起讀（最舊→最新）→ 視覺流動。
-const WAVE_COLS: usize = 128;
-const WAVE_PUSH: usize = 32; // 每輪推進的欄數（捲動速度）
-static WAVE_RING_CLK: [AtomicU32; 4] = [const { AtomicU32::new(0) }; 4];
-static WAVE_RING_DIO: [AtomicU32; 4] = [const { AtomicU32::new(0) }; 4];
-static WAVE_POS: AtomicU32 = AtomicU32::new(0); // 下一個寫入欄（= 最舊欄）
-
-fn ring_set(arr: &[AtomicU32; 4], col: usize, bit: bool) {
-    let wi = col / 32;
-    let m = 1u32 << (col % 32);
-    let mut v = arr[wi].load(Ordering::Relaxed);
-    v = if bit { v | m } else { v & !m };
-    arr[wi].store(v, Ordering::Relaxed); // 單一寫入者(dap_task)，load/store 即可
+/// layer 2 目標自動偵測 + 連線品質的跨 task 共享狀態（dap_task 單一寫入、oled_task 讀；全 atomic）。
+struct TargetShared {
+    /// 0 = 無/未偵測；否則 bit31 有效旗標 | 低 12 位 DEV_ID。
+    devid: AtomicU32,
+    /// 可燒錄狀態（`RdpLevel` as u8）：0=L0,1=L1,2=L2,0xFF=未知/無。
+    flash: AtomicU8,
+    /// JEP106 廠商碼 + 廠商專屬 part（Nordic FICR 等）。
+    designer: AtomicU32,
+    part: AtomicU32,
+    /// 自適應偵測實際採用的 SWCLK（kHz）；0 = 沒讀到。
+    used_khz: AtomicU32,
+    /// 連線品質訊號儀：每輪 16 次讀取成功數（DP 短交易 / AP AHB 長交易）。
+    link_dp: AtomicU32,
+    link_ap: AtomicU32,
 }
 
-/// 從擷取緩衝找出時脈片段，取乾淨的 WAVE_PUSH 欄(1:1，不混疊)推進 ring。
-fn push_wave(buf: &[u32]) {
-    let total = logic::SAMPLES;
-    // 找第一個 SWCLK 跳變，從略前處取片段（確保含時脈、非開頭閒置）。
-    let (c0, _) = logic::sample_at(buf, 0);
-    let mut start = 0usize;
-    for i in 1..total {
-        if logic::sample_at(buf, i).0 != c0 {
-            start = i.saturating_sub(2);
-            break;
+impl TargetShared {
+    const VALID: u32 = 1 << 31;
+    const fn new() -> Self {
+        Self {
+            devid: AtomicU32::new(0),
+            flash: AtomicU8::new(0xFF),
+            designer: AtomicU32::new(0),
+            part: AtomicU32::new(0),
+            used_khz: AtomicU32::new(0),
+            link_dp: AtomicU32::new(0),
+            link_ap: AtomicU32::new(0),
         }
     }
-    if start + WAVE_PUSH > total {
-        start = total - WAVE_PUSH;
+    /// 寫入偵測結果（designer/part/flash 先寫，devid 含有效旗標最後寫）。
+    fn store(&self, info: &dap::TargetInfo) {
+        self.designer.store(info.designer as u32, Ordering::Relaxed);
+        self.part.store(info.part, Ordering::Relaxed);
+        self.flash.store(info.rdp.to_u8(), Ordering::Relaxed);
+        self.devid
+            .store(Self::VALID | info.devid as u32, Ordering::Relaxed);
     }
-    let mut pos = WAVE_POS.load(Ordering::Relaxed) as usize;
-    for k in 0..WAVE_PUSH {
-        let (c, d) = logic::sample_at(buf, start + k);
-        ring_set(&WAVE_RING_CLK, pos, c);
-        ring_set(&WAVE_RING_DIO, pos, d);
-        pos = (pos + 1) % WAVE_COLS;
+    /// 清除（無目標）。
+    fn clear(&self) {
+        self.devid.store(0, Ordering::Relaxed);
+        self.flash.store(0xFF, Ordering::Relaxed);
     }
-    WAVE_POS.store(pos as u32, Ordering::Relaxed);
+    fn valid(&self) -> bool {
+        self.devid.load(Ordering::Relaxed) & Self::VALID != 0
+    }
+    fn devid(&self) -> u16 {
+        (self.devid.load(Ordering::Relaxed) & 0xFFF) as u16
+    }
+    fn designer(&self) -> u16 {
+        self.designer.load(Ordering::Relaxed) as u16
+    }
+    fn part(&self) -> u32 {
+        self.part.load(Ordering::Relaxed)
+    }
+    fn rdp(&self) -> dap::RdpLevel {
+        dap::RdpLevel::from_u8(self.flash.load(Ordering::Relaxed))
+    }
+    fn set_used_khz(&self, khz: u32) {
+        self.used_khz.store(khz, Ordering::Relaxed);
+    }
+    fn used_khz(&self) -> u32 {
+        self.used_khz.load(Ordering::Relaxed)
+    }
+    fn set_link(&self, q: &dap::LinkQuality) {
+        self.link_dp.store(q.dp as u32, Ordering::Relaxed);
+        self.link_ap.store(q.ap as u32, Ordering::Relaxed);
+    }
+    /// (dp, ap) 成功數。
+    fn link(&self) -> (u32, u32) {
+        (
+            self.link_dp.load(Ordering::Relaxed),
+            self.link_ap.load(Ordering::Relaxed),
+        )
+    }
 }
 
-/// 無回應(拔線/無目標)：推進 WAVE_PUSH 欄平線 → 平段捲入畫面，直覺反映「沒訊號」。
-fn push_flat() {
-    let mut pos = WAVE_POS.load(Ordering::Relaxed) as usize;
-    for _ in 0..WAVE_PUSH {
-        ring_set(&WAVE_RING_CLK, pos, false);
-        ring_set(&WAVE_RING_DIO, pos, false);
-        pos = (pos + 1) % WAVE_COLS;
-    }
-    WAVE_POS.store(pos as u32, Ordering::Relaxed);
+static TARGET: TargetShared = TargetShared::new();
+
+/// SWD 數位邏輯波形 token ring（環形緩衝、捲動式）：`WAVE_COLS` 欄各 1 bit，兩通道(SWCLK/SWDIO)。
+/// 每輪擷取把新片段「推進」ring（最新覆蓋最舊、不積壓），OLED 由 pos 起讀（最舊→最新）→ 視覺流動。
+const WAVE_COLS: usize = 128;
+const WAVE_PUSH: usize = 32; // 每輪推進的欄數（捲動速度）
+
+struct WaveRing {
+    clk: [AtomicU32; 4],
+    dio: [AtomicU32; 4],
+    pos: AtomicU32, // 下一個寫入欄（= 最舊欄）
 }
 
-/// 載入 ring 通道為 [u32;4] 快照（供 OLED）。
-fn load_wave(arr: &[AtomicU32; 4]) -> [u32; 4] {
-    [
-        arr[0].load(Ordering::Relaxed),
-        arr[1].load(Ordering::Relaxed),
-        arr[2].load(Ordering::Relaxed),
-        arr[3].load(Ordering::Relaxed),
-    ]
+impl WaveRing {
+    const fn new() -> Self {
+        Self {
+            clk: [const { AtomicU32::new(0) }; 4],
+            dio: [const { AtomicU32::new(0) }; 4],
+            pos: AtomicU32::new(0),
+        }
+    }
+    fn set_bit(arr: &[AtomicU32; 4], col: usize, bit: bool) {
+        let wi = col / 32;
+        let m = 1u32 << (col % 32);
+        let mut v = arr[wi].load(Ordering::Relaxed);
+        v = if bit { v | m } else { v & !m };
+        arr[wi].store(v, Ordering::Relaxed); // 單一寫入者(dap_task)，load/store 即可
+    }
+    /// 從擷取緩衝找出時脈片段，取乾淨的 WAVE_PUSH 欄(1:1，不混疊)推進 ring。
+    fn push(&self, buf: &[u32]) {
+        let total = logic::SAMPLES;
+        // 找第一個 SWCLK 跳變，從略前處取片段（確保含時脈、非開頭閒置）。
+        let (c0, _) = logic::sample_at(buf, 0);
+        let mut start = 0usize;
+        for i in 1..total {
+            if logic::sample_at(buf, i).0 != c0 {
+                start = i.saturating_sub(2);
+                break;
+            }
+        }
+        if start + WAVE_PUSH > total {
+            start = total - WAVE_PUSH;
+        }
+        let mut pos = self.pos.load(Ordering::Relaxed) as usize;
+        for k in 0..WAVE_PUSH {
+            let (c, d) = logic::sample_at(buf, start + k);
+            Self::set_bit(&self.clk, pos, c);
+            Self::set_bit(&self.dio, pos, d);
+            pos = (pos + 1) % WAVE_COLS;
+        }
+        self.pos.store(pos as u32, Ordering::Relaxed);
+    }
+    /// 無回應(拔線/無目標)：推進 WAVE_PUSH 欄平線 → 平段捲入畫面，直覺反映「沒訊號」。
+    fn push_flat(&self) {
+        let mut pos = self.pos.load(Ordering::Relaxed) as usize;
+        for _ in 0..WAVE_PUSH {
+            Self::set_bit(&self.clk, pos, false);
+            Self::set_bit(&self.dio, pos, false);
+            pos = (pos + 1) % WAVE_COLS;
+        }
+        self.pos.store(pos as u32, Ordering::Relaxed);
+    }
+    fn snapshot(arr: &[AtomicU32; 4]) -> [u32; 4] {
+        [
+            arr[0].load(Ordering::Relaxed),
+            arr[1].load(Ordering::Relaxed),
+            arr[2].load(Ordering::Relaxed),
+            arr[3].load(Ordering::Relaxed),
+        ]
+    }
+    fn load_clk(&self) -> [u32; 4] {
+        Self::snapshot(&self.clk)
+    }
+    fn load_dio(&self) -> [u32; 4] {
+        Self::snapshot(&self.dio)
+    }
+    fn pos(&self) -> usize {
+        self.pos.load(Ordering::Relaxed) as usize
+    }
 }
+
+static WAVE: WaveRing = WaveRing::new();
 
 /// 記錄一筆 DAP 事件（dap_task 單一寫入者）。
 fn record_evt(id: u8) {
@@ -334,7 +416,7 @@ async fn dap_task(
                     }
                 }
             }
-            USED_KHZ.store(used, Ordering::Relaxed);
+            TARGET.set_used_khz(used);
 
             let mut buf = [0u32; logic::CAP_WORDS];
             if used != 0 {
@@ -344,30 +426,23 @@ async fn dap_task(
                 let _ = dap.swd_read_dpidr().await;
                 let _ = select(xfer, Timer::after(Duration::from_millis(20))).await;
                 cap.stop();
-                push_wave(&buf);
+                WAVE.push(&buf);
                 absent = 0;
-                if TARGET_DEVID.load(Ordering::Relaxed) & DEVID_VALID == 0
+                if !TARGET.valid()
                     && let Some(info) = dap.detect_target().await
                 {
-                    TARGET_DESIGNER.store(info.designer as u32, Ordering::Relaxed);
-                    TARGET_PART.store(info.part, Ordering::Relaxed);
-                    TARGET_FLASH.store(info.rdp.to_u8(), Ordering::Relaxed);
-                    // TARGET_DEVID 最後寫（含 valid 旗標，OLED 以它判斷有無目標）。
-                    TARGET_DEVID.store(DEVID_VALID | info.devid as u32, Ordering::Relaxed);
+                    TARGET.store(&info);
                 }
                 // 連線品質量測（每輪）→ OLED 訊號儀，讓使用者照數字接出最佳線路。
-                let (dp_ok, ap_ok) = dap.link_quality().await;
-                LINK_DP.store(dp_ok as u32, Ordering::Relaxed);
-                LINK_AP.store(ap_ok as u32, Ordering::Relaxed);
+                let q = dap.link_quality().await;
+                TARGET.set_link(&q);
             } else {
                 // 無回應（拔線/無目標）→ 推進平線,平段捲入畫面反映「沒訊號」。
-                push_flat();
+                WAVE.push_flat();
                 absent += 1;
-                LINK_DP.store(0, Ordering::Relaxed);
-                LINK_AP.store(0, Ordering::Relaxed);
+                TARGET.set_link(&dap::LinkQuality { dp: 0, ap: 0 });
                 if absent >= 2 {
-                    TARGET_DEVID.store(0, Ordering::Relaxed);
-                    TARGET_FLASH.store(0xFF, Ordering::Relaxed);
+                    TARGET.clear();
                 }
             }
             dap.set_swclk_khz(saved_khz); // 還原 host 設定
@@ -382,11 +457,11 @@ async fn oled_task(mut dbg: display::DebugOled, mut led: Output<'static>) {
         led.toggle();
         // 第 1 行：晶片型號（自動偵測；dap_task 閒置時更新）。
         let mut l_chip: heapless::String<21> = heapless::String::new();
-        let dv = TARGET_DEVID.load(Ordering::Relaxed);
-        if dv & DEVID_VALID != 0 {
-            let id = (dv & 0xFFF) as u16;
-            let designer = TARGET_DESIGNER.load(Ordering::Relaxed) as u16;
-            let part = TARGET_PART.load(Ordering::Relaxed);
+        let valid = TARGET.valid();
+        if valid {
+            let id = TARGET.devid();
+            let designer = TARGET.designer();
+            let part = TARGET.part();
             if id != 0 {
                 // ST / GD32：精確型號
                 match chip_name(id) {
@@ -416,20 +491,18 @@ async fn oled_task(mut dbg: display::DebugOled, mut led: Output<'static>) {
         }
         // 第 3 行：可燒錄狀態（依 RDP 讀保護等級）；無目標則空白。
         let mut l_flash: heapless::String<21> = heapless::String::new();
-        if dv & DEVID_VALID != 0 {
-            let level = dap::RdpLevel::from_u8(TARGET_FLASH.load(Ordering::Relaxed));
-            let _ = write!(l_flash, "{}", level.label());
+        if valid {
+            let _ = write!(l_flash, "{}", TARGET.rdp().label());
         }
-        let clk = load_wave(&WAVE_RING_CLK);
-        let dio = load_wave(&WAVE_RING_DIO);
-        let pos = WAVE_POS.load(Ordering::Relaxed) as usize;
+        let clk = WAVE.load_clk();
+        let dio = WAVE.load_dio();
+        let pos = WAVE.pos();
         // 第 5 行：連線品質訊號儀 — DP(短交易) / AP(AHB 長交易,燒錄需要) 各 /16 + 鎖定 SWCLK。
         // 接線時看這行：AP 往 16 爬 = 訊號變好；DP16/AP0 穩定 = RDP1 讀保護(非 SI)。
         let mut l_scale: heapless::String<21> = heapless::String::new();
-        let used = USED_KHZ.load(Ordering::Relaxed);
+        let used = TARGET.used_khz();
         if used > 0 {
-            let dp = LINK_DP.load(Ordering::Relaxed);
-            let ap = LINK_AP.load(Ordering::Relaxed);
+            let (dp, ap) = TARGET.link();
             let _ = write!(l_scale, "DP{}/16 AP{}/16 {}k", dp, ap, used);
         } else {
             let _ = write!(l_scale, "no signal  clk --");
