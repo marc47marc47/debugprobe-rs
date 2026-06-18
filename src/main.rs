@@ -429,20 +429,33 @@ async fn dap_task(
     }
 }
 
-/// 自適應 SWCLK（黏著 + 遲滯）：先試上次能通的速率，失敗則由快到慢重掃（含 RP2040 multidrop）。
-/// 回傳實際採用的速率(kHz)，0 = 沒讀到；命中較低速時更新 `sticky`（避免每輪重掃造成顯示亂跳）。
+/// 自適應 SWCLK（黏著 + 遲滯）：回傳實際採用的速率(kHz)，0 = 沒讀到。
+///
+/// **重要順序**：先把所有速率的 *single-drop*（純讀 DPIDR、**不寫 TARGETSEL**）掃完，
+/// 只有完全沒有單核回應，才最後試 RP multidrop。原因：multidrop 的 TARGETSEL 寫入會把
+/// 「現代 DPv2 STM32（F4/F7/G0/G4/L4/H7…）」誤 deselect（寫到不是它的 TARGETID），
+/// 之後連 line reset 都救不回 → 整顆 STM32 啞掉。故可偵測的單核目標一律走 single-drop。
 #[cfg(feature = "active-detect")]
 async fn adaptive_sweep(dap: &mut dap::Dap<'static>, sticky: &mut u32) -> u32 {
+    // 1) single-drop：先試黏著速率，再由快到慢掃（全程不寫 TARGETSEL，不會誤刪 DPv2 STM32）。
     dap.set_swclk_khz(*sticky);
     dap.swd_wakeup().await;
-    if dap.swd_read_dpidr().await || dap.swd_select_rp().await {
+    if dap.swd_read_dpidr().await {
         return *sticky;
     }
     for &khz in &[1000u32, 500, 250, 100, 50, 20] {
         dap.set_swclk_khz(khz);
         dap.swd_wakeup().await;
-        if dap.swd_read_dpidr().await || dap.swd_select_rp().await {
+        if dap.swd_read_dpidr().await {
             *sticky = khz; // 鎖定新速率
+            return khz;
+        }
+    }
+    // 2) 單核完全無回應 → 才試 RP2040/RP2350 multidrop（會寫 TARGETSEL，故只當 last resort）。
+    for &khz in &[1000u32, 500, 250] {
+        dap.set_swclk_khz(khz);
+        if dap.swd_select_rp().await {
+            *sticky = khz;
             return khz;
         }
     }
