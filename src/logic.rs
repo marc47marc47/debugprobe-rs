@@ -88,3 +88,28 @@ pub fn sample_at(buf: &[u32], idx: usize) -> (bool, bool) {
     let s = (w >> (2 * (idx % 16))) & 0b11;
     (s & 1 != 0, s & 2 != 0)
 }
+
+/// 數擷取窗內 SWCLK/SWDIO 的邊緣(跳變)數與高電位取樣數。回 (clk_e, dio_e, clk_hi, dio_hi)。
+pub(crate) fn count_signal(buf: &[u32]) -> (u32, u32, u32, u32) {
+    let (mut pc, mut pd) = sample_at(buf, 0);
+    let (mut ce, mut de) = (0u32, 0u32);
+    let (mut ch, mut dh) = (pc as u32, pd as u32); // 取樣 0 的高電位計入
+    for i in 1..SAMPLES {
+        let (c, d) = sample_at(buf, i);
+        if c != pc {
+            ce += 1;
+            pc = c;
+        }
+        if d != pd {
+            de += 1;
+            pd = d;
+        }
+        if c {
+            ch += 1;
+        }
+        if d {
+            dh += 1;
+        }
+    }
+    (ce, de, ch, dh)
+}
