@@ -11,36 +11,19 @@
 use core::fmt::Write as _;
 use embassy_executor::Spawner;
 use embassy_rp::gpio::{Level, Output};
-use embassy_rp::i2c::{Config as I2cConfig, I2c};
 use embassy_rp::uart::{Config as UartConfig, UartTx};
 use embassy_time::{Duration, Timer};
-use embedded_graphics::mono_font::MonoTextStyle;
-use embedded_graphics::mono_font::ascii::FONT_6X10;
-use embedded_graphics::pixelcolor::BinaryColor;
-use embedded_graphics::prelude::*;
-use embedded_graphics::text::{Baseline, Text};
-use ssd1306::prelude::*;
-use ssd1306::{I2CDisplayInterface, Ssd1306};
 use {defmt_rtt as _, panic_probe as _};
+
+#[path = "../testkit.rs"]
+mod testkit;
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
 
     // OLED（I2C1: SCL=GP7, SDA=GP6）
-    let i2c = I2c::new_blocking(p.I2C1, p.PIN_7, p.PIN_6, I2cConfig::default());
-    let iface = I2CDisplayInterface::new(i2c);
-    let mut oled = Ssd1306::new(iface, DisplaySize128x64, DisplayRotation::Rotate0)
-        .into_buffered_graphics_mode();
-    let _ = oled.init();
-    let style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
-    let mut draw = |l1: &str, l2: &str, l3: &str| {
-        let _ = oled.clear(BinaryColor::Off);
-        let _ = Text::with_baseline(l1, Point::new(0, 0), style, Baseline::Top).draw(&mut oled);
-        let _ = Text::with_baseline(l2, Point::new(0, 16), style, Baseline::Top).draw(&mut oled);
-        let _ = Text::with_baseline(l3, Point::new(0, 32), style, Baseline::Top).draw(&mut oled);
-        let _ = oled.flush();
-    };
+    let mut oled = testkit::Oled3::new(p.I2C1, p.PIN_7, p.PIN_6);
 
     // UART0 TX = GP0，115200
     let mut cfg = UartConfig::default();
@@ -58,7 +41,7 @@ async fn main(_spawner: Spawner) {
 
         let mut s: heapless::String<21> = heapless::String::new();
         let _ = write!(s, "sent #{}", n);
-        draw("uarthello (target)", "UART0 TX 115200", s.as_str());
+        oled.draw("uarthello (target)", "UART0 TX 115200", s.as_str());
 
         led.toggle();
         n = n.wrapping_add(1);

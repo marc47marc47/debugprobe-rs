@@ -348,6 +348,6 @@
 - [x] **R6** newtype：`ClockKHz`/`LineStatus`/`SignalStats`/`ScanState`/`HostActivity`；link 併回 `LinkQuality`。
 - [x] **R7** 周邊：display render 拆子函式 + layout 常數；usb `build()` 拆步驟 + `UsbIds`；uart `BaudCommand`；autobaud `AutoBaudParams`。
 - [x] **R8** board 結構化：`BoardConfig{Pins,Leds,UartPins}`，三板 `pub const CONFIG`，pico/pico2 去重。
-- [ ] **R9** 測試 bin 去重：建 `src/lib.rs` 共用 `testkit`（OLED+LED+UART setup）。
+- [x] **R9** 測試 bin 去重：新增 src/testkit.rs（Oled3 helper），uartmon/uarthello 以 #[path] 共用（免改 crate 結構）。
 
 註：`JEP_RASPI` 保留（VENDOR_NAMES 有用）。
