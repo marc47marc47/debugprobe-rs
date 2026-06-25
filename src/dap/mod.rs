@@ -963,6 +963,11 @@ impl<'d> Dap<'d> {
     pub fn swclk_khz(&self) -> u32 {
         self.probe.freq_khz()
     }
+    /// 逐線連通偵測（轉呼叫 PIO 物理層 `Probe::probe_lines`）。回 (dio_connected, clk_connected)。
+    /// 供走線監測判斷哪條線斷：drive 反向→釋放→讀目標內部 pull 翻轉。僅在 host 閒置時呼叫。
+    pub async fn probe_lines(&mut self) -> (bool, bool) {
+        self.probe.probe_lines().await
+    }
 }
 
 /// 把 NUL 結尾字串寫入 DAP_Info 回應（resp[1]=長度含 NUL）。

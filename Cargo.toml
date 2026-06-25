@@ -50,6 +50,12 @@ active-detect = []
 # 時，獨立判斷目標是否回應；**勿與 probe-rs/OpenOCD/usbipd-rs 同時使用**(會互相干擾)。
 force-detect = ["active-detect"]
 
+# 走線健康持續監測模式：插著 PC 也持續監測 SWD 走線(逐線連通 + 訊號 + 連線品質)，OLED 即時顯示
+# 「哪一條線(SWCLK/SWDIO/GND/PWR)出問題」。與 force-detect 一樣 host 閒置才監測，但額外加「host 活動
+# 退避」(剛收到 host DAP 指令的 GUARD 秒內跳過監測) → 不干擾 probe-rs/OpenOCD 的 layer-2 燒錄。
+# 用於反覆拔插測走線穩定度的測試台。仍建議走線測試時不要同時主動燒錄。
+wiring-monitor = ["active-detect"]
+
 # 晶片選擇 (對應 C 的 PICO_BOARD / target)
 rp2040 = ["embassy-rp/rp2040"]
 rp2350 = ["embassy-rp/rp235xa"]

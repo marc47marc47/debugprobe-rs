@@ -69,6 +69,68 @@ static EVT_RING: [AtomicU8; EVT_N] = [
 static EVT_SEQ: AtomicU32 = AtomicU32::new(0); // 單調寫入序號（單一寫入者 = dap_task）
 static UART_RX_BYTES: AtomicU32 = AtomicU32::new(0); // 目標→host（client log）
 static UART_TX_BYTES: AtomicU32 = AtomicU32::new(0); // host→目標
+/// 走線健康判定結論（走線監測：由 `classify` 依逐線連通 + 訊號邊緣 + 連線品質產生）。
+/// `Unknown` 為初值（尚未掃過，例如 host 在線且預設 build 不監測）→ OLED 沿用既有顯示。
+#[derive(Clone, Copy)]
+enum WireVerdict {
+    Unknown,      // 0：尚未判定
+    Ok,           // 1：兩線連通、DP/AP 近滿
+    SwclkOpen,    // 2：SWCLK 斷/接觸不良（不連通或探針驅出後幾乎無邊緣）
+    SwdioOpen,    // 3：SWDIO 斷
+    BothOpen,     // 4：兩線皆斷（或目標整個浮空/無電）
+    NoTarget,     // 5：兩線連通、SWCLK 在動，但完全讀不到 DP（對端無晶片）
+    PwrParasitic, // 6：DP 穩但 AP 全失敗（寄生供電/電不足驅 AHB，或 RDP1）
+    GndBad,       // 7：讀得到但 DP 成功率低（共地阻抗高、訊號抖）
+    Unstable,     // 8：連上但 AP 長交易抖（邊緣/反射/接點劣化）
+}
+
+impl WireVerdict {
+    fn to_u8(self) -> u8 {
+        match self {
+            WireVerdict::Unknown => 0,
+            WireVerdict::Ok => 1,
+            WireVerdict::SwclkOpen => 2,
+            WireVerdict::SwdioOpen => 3,
+            WireVerdict::BothOpen => 4,
+            WireVerdict::NoTarget => 5,
+            WireVerdict::PwrParasitic => 6,
+            WireVerdict::GndBad => 7,
+            WireVerdict::Unstable => 8,
+        }
+    }
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => WireVerdict::Ok,
+            2 => WireVerdict::SwclkOpen,
+            3 => WireVerdict::SwdioOpen,
+            4 => WireVerdict::BothOpen,
+            5 => WireVerdict::NoTarget,
+            6 => WireVerdict::PwrParasitic,
+            7 => WireVerdict::GndBad,
+            8 => WireVerdict::Unstable,
+            _ => WireVerdict::Unknown,
+        }
+    }
+    /// OLED 第 1 行的走線結論字串（有走線問題時取代晶片名）。
+    fn text(self) -> &'static str {
+        match self {
+            WireVerdict::Unknown => "no target",
+            WireVerdict::Ok => "OK",
+            WireVerdict::SwclkOpen => "SWCLK BAD",
+            WireVerdict::SwdioOpen => "SWDIO BAD",
+            WireVerdict::BothOpen => "BOTH OPEN",
+            WireVerdict::NoTarget => "no target",
+            WireVerdict::PwrParasitic => "PWR/AP fail",
+            WireVerdict::GndBad => "GND BAD",
+            WireVerdict::Unstable => "UNSTABLE",
+        }
+    }
+    /// 「走線正常、可照常顯示晶片資訊」的狀態（OK 或尚未判定）。
+    fn shows_chip(self) -> bool {
+        matches!(self, WireVerdict::Ok | WireVerdict::Unknown)
+    }
+}
+
 /// layer 2 目標自動偵測 + 連線品質的跨 task 共享狀態（dap_task 單一寫入、oled_task 讀；全 atomic）。
 struct TargetShared {
     /// 0 = 無/未偵測；否則 bit31 有效旗標 | 低 12 位 DEV_ID。
@@ -94,6 +156,14 @@ struct TargetShared {
     /// 邊緣=0 且 高=滿 → 卡高;邊緣=0 且 高=0 → 卡低;邊緣多且 高≈半 → 正常 toggle。
     clk_hi: AtomicU32,
     dio_hi: AtomicU32,
+    /// 走線監測：逐線連通（probe_lines 結果，0/1）。
+    dio_conn: AtomicU8,
+    clk_conn: AtomicU8,
+    /// 走線判定結論（`WireVerdict` as u8）。
+    verdict: AtomicU8,
+    /// 鬆動統計：連通狀態翻轉（接↔斷）累計次數，最多者 = 最會鬆的線。
+    clk_flaps: AtomicU32,
+    dio_flaps: AtomicU32,
 }
 
 impl TargetShared {
@@ -113,7 +183,43 @@ impl TargetShared {
             dio_edges: AtomicU32::new(0),
             clk_hi: AtomicU32::new(0),
             dio_hi: AtomicU32::new(0),
+            dio_conn: AtomicU8::new(0),
+            clk_conn: AtomicU8::new(0),
+            verdict: AtomicU8::new(0),
+            clk_flaps: AtomicU32::new(0),
+            dio_flaps: AtomicU32::new(0),
         }
+    }
+    /// 記錄逐線連通結果。
+    fn set_lines(&self, dio: bool, clk: bool) {
+        self.dio_conn.store(dio as u8, Ordering::Relaxed);
+        self.clk_conn.store(clk as u8, Ordering::Relaxed);
+    }
+    /// 回 (dio_connected, clk_connected)。
+    fn lines(&self) -> (bool, bool) {
+        (
+            self.dio_conn.load(Ordering::Relaxed) != 0,
+            self.clk_conn.load(Ordering::Relaxed) != 0,
+        )
+    }
+    fn set_verdict(&self, v: WireVerdict) {
+        self.verdict.store(v.to_u8(), Ordering::Relaxed);
+    }
+    fn verdict(&self) -> WireVerdict {
+        WireVerdict::from_u8(self.verdict.load(Ordering::Relaxed))
+    }
+    fn bump_clk_flap(&self) {
+        self.clk_flaps.fetch_add(1, Ordering::Relaxed);
+    }
+    fn bump_dio_flap(&self) {
+        self.dio_flaps.fetch_add(1, Ordering::Relaxed);
+    }
+    /// 回 (clk_flaps, dio_flaps)。
+    fn flaps(&self) -> (u32, u32) {
+        (
+            self.clk_flaps.load(Ordering::Relaxed),
+            self.dio_flaps.load(Ordering::Relaxed),
+        )
     }
     /// 記錄掃頻目前嘗試的速率（kHz）。
     fn set_probe_khz(&self, khz: u32) {
@@ -399,6 +505,8 @@ async fn dap_task(
     mut cap: logic::LogicCapture<'static>,
 ) {
     use embassy_futures::select::{Either, Either3, select, select3};
+    #[cfg(feature = "wiring-monitor")]
+    use embassy_time::Instant;
     let mut bulk_req = [0u8; 64];
     let mut hid_req = [0u8; 64];
     let mut resp = [0u8; 64];
@@ -406,6 +514,13 @@ async fn dap_task(
     let mut absent: u32 = 0; // 連續取樣不到次數（拔除 hysteresis）
     #[cfg(feature = "active-detect")]
     let mut sticky_khz: u32 = 1000; // 黏著速率：鎖在上次能通的 SWCLK，避免每輪重掃造成顯示亂跳
+    #[cfg(feature = "active-detect")]
+    let mut prev_lines: Option<(bool, bool)> = None; // 上輪逐線連通（鬆動 flap 統計用）
+    // 走線監測：最後一次收到 host DAP 指令的時間；GUARD 內不監測，保護 F1 燒錄不被擾。
+    #[cfg(feature = "wiring-monitor")]
+    let mut last_host: Option<Instant> = None;
+    #[cfg(feature = "wiring-monitor")]
+    const GUARD: Duration = Duration::from_secs(2);
 
     // FAST：無 USB host（未列舉）時的取樣節奏（每 FAST 即進行一次自主偵測）。
     // SLOW：有 host 時的指令等待逾時。host 在線時**一律不**插入自主偵測（讓出 SWD 給除錯器，
@@ -426,6 +541,10 @@ async fn dap_task(
                 {
                     Either3::First(Ok(n)) if n > 0 => {
                         record_evt(bulk_req[0]);
+                        #[cfg(feature = "wiring-monitor")]
+                        {
+                            last_host = Some(Instant::now());
+                        }
                         let len = dap.execute_command(&bulk_req[..n], &mut resp).await;
                         if len > 0 {
                             let _ = transport.write_ep.write(&resp[..len]).await;
@@ -434,6 +553,10 @@ async fn dap_task(
                     }
                     Either3::Second(Ok(_)) => {
                         record_evt(hid_req[0]);
+                        #[cfg(feature = "wiring-monitor")]
+                        {
+                            last_host = Some(Instant::now());
+                        }
                         resp.fill(0);
                         let _ = dap.execute_command(&hid_req, &mut resp).await;
                         let _ = transport.hid_writer.write(&resp).await;
@@ -442,10 +565,10 @@ async fn dap_task(
                     // host 已連線但閒置：
                     // - 正常(穩定)版：**一律不偵測**。自主偵測會做 line reset + 掃頻 + 改寫 DP
                     //   SELECT/CTRL-STAT，在 host 兩次存取間清掉鏈路 → 忽好忽壞。host 在線時讓出 SWD。
-                    // - force-detect 診斷版：插著 PC 也偵測(僅供「只看 OLED、不跑除錯工具」獨立判斷目標)。
-                    #[cfg(feature = "force-detect")]
+                    // - force-detect / wiring-monitor 診斷版：插著 PC 也偵測（wiring-monitor 另有 GUARD 退避）。
+                    #[cfg(any(feature = "force-detect", feature = "wiring-monitor"))]
                     Either3::Third(()) => true,
-                    #[cfg(not(feature = "force-detect"))]
+                    #[cfg(not(any(feature = "force-detect", feature = "wiring-monitor")))]
                     Either3::Third(()) => false,
                     _ => false,
                 }
@@ -458,12 +581,57 @@ async fn dap_task(
         #[cfg(not(feature = "active-detect"))]
         let _ = idle;
 
-        // 閒置（含無 USB 連線）：跑一輪自主掃描（擷取波形 + 偵測晶片 + 量連線品質）。
+        // 閒置（含無 USB 連線）：跑一輪自主掃描（逐線連通 + 擷取波形 + 偵測晶片 + 量連線品質）。
+        // wiring-monitor：剛收到 host 指令 GUARD 內**跳過**，確保不在燒錄封包間隙插入而毀掉 session。
         #[cfg(feature = "active-detect")]
         if idle {
-            idle_scan(&mut dap, &mut cap, &mut sticky_khz, &mut absent).await;
+            #[cfg(feature = "wiring-monitor")]
+            let proceed = last_host.is_none_or(|t| Instant::now().duration_since(t) >= GUARD);
+            #[cfg(not(feature = "wiring-monitor"))]
+            let proceed = true;
+            if proceed {
+                idle_scan(&mut dap, &mut cap, &mut sticky_khz, &mut absent, &mut prev_lines).await;
+            }
         }
     }
+}
+
+// 走線判定門檻（實機可微調）。ce = SWCLK 邊緣數；dp/ap = link_quality 各 0..16 成功數。
+#[cfg(feature = "active-detect")]
+const EDGE_MIN: u32 = 4; // ce 視為「SWCLK 有在動」的最小邊緣數
+#[cfg(feature = "active-detect")]
+const DP_GOOD: u32 = 12; // DP 視為穩定
+#[cfg(feature = "active-detect")]
+const DP_OK: u32 = 14; // OK 門檻
+#[cfg(feature = "active-detect")]
+const AP_OK: u32 = 14;
+
+/// 依逐線連通 (dio,clk) + SWCLK 邊緣 ce + 連線品質 (dp,ap) 判定「哪條線/什麼問題」。
+/// 短路順序：先判最確定的斷線，再判讀不到/供電/共地/抖動，最後才 OK。
+#[cfg(feature = "active-detect")]
+fn classify(dio: bool, clk: bool, ce: u32, dp: u32, ap: u32) -> WireVerdict {
+    if !dio && !clk {
+        return WireVerdict::BothOpen;
+    }
+    if !clk || ce < EDGE_MIN {
+        return WireVerdict::SwclkOpen; // 不連通，或探針驅出後幾乎無邊緣 → 虛接
+    }
+    if !dio {
+        return WireVerdict::SwdioOpen;
+    }
+    if dp == 0 {
+        return WireVerdict::NoTarget; // 兩線連通、SWCLK 在動，但完全讀不到 DP
+    }
+    if dp < DP_GOOD {
+        return WireVerdict::GndBad; // DP 成功率低 → 共地阻抗高 / 訊號抖
+    }
+    if ap == 0 {
+        return WireVerdict::PwrParasitic; // DP 穩但 AP 全失敗 → 寄生供電 / RDP1
+    }
+    if dp >= DP_OK && ap >= AP_OK {
+        return WireVerdict::Ok;
+    }
+    WireVerdict::Unstable
 }
 
 /// 自適應 SWCLK（黏著 + 遲滯）：回傳實際採用的速率(kHz)，0 = 沒讀到。
@@ -502,13 +670,31 @@ async fn idle_scan(
     cap: &mut logic::LogicCapture<'static>,
     sticky: &mut u32,
     absent: &mut u32,
+    prev: &mut Option<(bool, bool)>,
 ) {
     use embassy_futures::select::select;
     let saved_khz = dap.swclk_khz();
+
+    // 走線監測第一步：逐線連通（drive 反向→釋放→讀目標內部 pull）。判斷哪條線實體斷掉。
+    let (dio, clk) = dap.probe_lines().await;
+    TARGET.set_lines(dio, clk);
+    // 鬆動統計：與上輪比較，連通狀態翻轉即累加（反覆拔插時，flap 最多者 = 最會鬆的線）。
+    if let Some((pd, pc)) = *prev {
+        if dio != pd {
+            TARGET.bump_dio_flap();
+        }
+        if clk != pc {
+            TARGET.bump_clk_flap();
+        }
+    }
+    *prev = Some((dio, clk));
+
     let used = adaptive_sweep(dap, sticky).await;
     TARGET.set_used_khz(used);
 
     let mut buf = [0u32; logic::CAP_WORDS];
+    let ce;
+    let (dp, ap);
     if used != 0 {
         *absent = 0;
         // 偵測到目標(可用速率)才擷取波形 + 量邊緣(此時 SWCLK 在跑、量得到真訊號)。
@@ -517,10 +703,10 @@ async fn idle_scan(
         let _ = dap.swd_read_dpidr().await; // 訊號刺激
         let _ = select(xfer, Timer::after(Duration::from_millis(20))).await;
         cap.stop();
-        let (ce, de, ch, dh) = count_signal(&buf);
-        TARGET.set_signal(ce, de, ch, dh);
+        let (ce0, de, ch, dh) = count_signal(&buf);
+        TARGET.set_signal(ce0, de, ch, dh);
         WAVE.push(&buf);
-        // 晶片偵測只在尚未鎖定時做一次。
+        // 晶片偵測只在尚未鎖定時做一次（F2 功能保留）。
         if !TARGET.valid()
             && let Some(info) = dap.detect_target().await
         {
@@ -528,6 +714,9 @@ async fn idle_scan(
         }
         let q = dap.link_quality().await;
         TARGET.set_link(&q);
+        ce = ce0;
+        dp = q.dp as u32;
+        ap = q.ap as u32;
     } else {
         // 無目標：不擷取(低速擷取無意義)、推平線、歸零。
         WAVE.push_flat();
@@ -537,7 +726,12 @@ async fn idle_scan(
         if *absent >= 2 {
             TARGET.clear();
         }
+        ce = 0;
+        dp = 0;
+        ap = 0;
     }
+    // 走線判定：彙整逐線連通 + 邊緣 + 連線品質 → 結論（供 OLED 即時顯示哪條線壞）。
+    TARGET.set_verdict(classify(dio, clk, ce, dp, ap));
     dap.set_swclk_khz(saved_khz); // 還原 host 設定
 }
 
@@ -573,10 +767,14 @@ fn count_signal(buf: &[u32]) -> (u32, u32, u32, u32) {
 async fn oled_task(mut dbg: display::DebugOled, mut led: Output<'static>) {
     loop {
         led.toggle();
-        // 第 1 行：晶片型號（自動偵測；dap_task 閒置時更新）。
-        let mut l_chip: heapless::String<21> = heapless::String::new();
         let valid = TARGET.valid();
-        if valid {
+        let verdict = TARGET.verdict();
+        let (dio_c, clk_c) = TARGET.lines(); // 逐線連通（走線監測）
+        // 走線正常(OK/未判定)→ 照常顯示晶片資訊(F2)；有走線問題 → 顯示哪條線壞。
+        let show_chip = verdict.shows_chip();
+        // 第 1 行：晶片型號 或 走線結論。
+        let mut l_chip: heapless::String<21> = heapless::String::new();
+        if show_chip && valid {
             let id = TARGET.devid();
             let designer = TARGET.designer();
             let part = TARGET.part();
@@ -605,23 +803,38 @@ async fn oled_task(mut dbg: display::DebugOled, mut led: Output<'static>) {
                     (None, None) => write!(l_chip, "vendor 0x{:03X}", designer),
                 };
             }
-        } else {
+        } else if show_chip {
             let _ = write!(l_chip, "no target");
+        } else {
+            // 走線問題：顯示結論（SWCLK BAD / SWDIO BAD / GND BAD / PWR fail …）。
+            let _ = write!(l_chip, "{}", verdict.text());
         }
-        // 第 2 行：可燒錄狀態（RDP）+ 頻率(append)；無目標則顯示探測頻率。
+        // 第 2 行：可燒狀態+頻率（走線好）或 逐線 OK/X（走線壞）。
         let mut l_flash: heapless::String<21> = heapless::String::new();
-        if valid {
+        if show_chip && valid {
             // 短標 + 頻率，控制在 x<82 不撞右側柱狀圖（如 "RDP0 1000k"）。
             let _ = write!(l_flash, "{} {}k", TARGET.rdp().short(), TARGET.used_khz());
-        } else {
+        } else if show_chip {
             let _ = write!(l_flash, "probe {}k", TARGET.probe_khz());
+        } else {
+            let _ = write!(
+                l_flash,
+                "CLK:{} DIO:{}",
+                if clk_c { "OK" } else { "X " },
+                if dio_c { "OK" } else { "X " }
+            );
         }
         let clk = WAVE.load_clk();
         let dio = WAVE.load_dio();
         let pos = WAVE.pos();
-        // 左下角文字：SM1 取樣率（每欄時間）= 取樣層狀態。
+        // 左下角文字：鬆動統計（反覆拔插時哪條線最會鬆）；尚無翻轉則顯示取樣率。
         let mut l_scale: heapless::String<21> = heapless::String::new();
-        let _ = write!(l_scale, "{}ns/col", logic::sample_ns());
+        let (cf, df) = TARGET.flaps();
+        if cf != 0 || df != 0 {
+            let _ = write!(l_scale, "flpC{} D{}", cf, df);
+        } else {
+            let _ = write!(l_scale, "{}ns/col", logic::sample_ns());
+        }
         // 右側 6 條柱狀圖（含 line1/line2 右側）：訊號層 Ce/De/hC/hD + 連線層 DP/AP。
         // Ce0 hC0=SWCLK卡低、Ce0 hC100=卡高、Ce 有長 hC≈50=正常 toggle；DP/AP 往滿=連線品質好。
         let (ce, de, ch, dh) = TARGET.signal();

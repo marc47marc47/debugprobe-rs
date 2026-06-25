@@ -39,5 +39,8 @@ build-pico-min = "build --release --no-default-features --features board-pico"
 build-pico2-min = "build --release --target thumbv8m.main-none-eabihf --no-default-features --features board-pico2"
 # 診斷版：插著 PC 也讓 OLED 自主偵測照跑（只看 OLED、勿同時跑除錯工具）。
 build-pico-diag = "build --release --no-default-features --features board-pico,force-detect"
+# 走線監測版：持續監測 SWD 走線、OLED 顯示哪條線壞；host 活動時自動退避故不擾燒錄（反覆拔插測走線用）。
+build-pico-monitor = "build --release --no-default-features --features board-pico,wiring-monitor"
+build-probe-monitor = "build --release --no-default-features --features board-debug-probe,wiring-monitor"
 # 透過 SWD 燒錄器直接燒錄 + RTT log（需 probe-rs）。
 run-probe = "run --release --no-default-features --features board-debug-probe,active-detect"
