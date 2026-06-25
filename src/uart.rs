@@ -43,7 +43,7 @@ pub async fn uart_bridge_task(
                     if let Ok(n) = res
                         && n > 0
                     {
-                        crate::UART_RX_BYTES
+                        crate::state::UART_RX_BYTES
                             .fetch_add(n as u32, core::sync::atomic::Ordering::Relaxed);
                         let _ = sender.write_packet(&ubuf[..n]).await;
                     }
@@ -53,7 +53,7 @@ pub async fn uart_bridge_task(
                     if let Ok(n) = res
                         && n > 0
                     {
-                        crate::UART_TX_BYTES
+                        crate::state::UART_TX_BYTES
                             .fetch_add(n as u32, core::sync::atomic::Ordering::Relaxed);
                         let _ = utx.write_all(&dbuf[..n]).await;
                     }

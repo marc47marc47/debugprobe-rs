@@ -343,7 +343,7 @@
   `Cmd::Skip`/`CmdAddrs.get_next`；`common`→`_common`（held-for-ownership）；拿掉 probe `#![allow(dead_code)]`。
 - [x] **R2** dap 拆模組：`dap/{types,regs,commands,swd,detect}.rs`（純搬家 + re-export）。
 - [x] **R3** dap 去重：`swd_wakeup` 複用、`debug_powerup`、`count_stable`、魔術數入 `dap::reg`。
-- [ ] **R4** main 拆 `state.rs`/`chipdb.rs`/`wiring.rs`（純搬家）。
+- [x] **R4** main 拆 `state.rs`/`chipdb.rs`/`wiring.rs`（純搬家）。
 - [ ] **R5** main 拆 `scan.rs`/`tasks.rs`；`count_signal` 入 `logic.rs`。
 - [ ] **R6** newtype：`ClockKHz`/`LineStatus`/`SignalStats`/`ScanState`/`HostActivity`；link 併回 `LinkQuality`。
 - [ ] **R7** 周邊：display render 拆子函式 + layout 常數；usb `build()` 拆步驟 + `UsbIds`；uart `BaudCommand`；autobaud `AutoBaudParams`。
