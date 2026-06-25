@@ -267,7 +267,7 @@ impl<'d> Probe<'d> {
         self._swdio.set_pull(Pull::None);
         self.sm.set_pin_dirs(Direction::In, &[&self._swdio]);
         Timer::after_micros(150).await;
-        let dio = (embassy_rp::pac::SIO.gpio_in(0).read() >> crate::board::PIN_SWDIO) & 1 != 0;
+        let dio = (embassy_rp::pac::SIO.gpio_in(0).read() >> crate::board::CONFIG.pins.swdio) & 1 != 0;
         self._swdio.set_pull(Pull::Up); // 還原（idle 高）
         self.sm.set_pin_dirs(Direction::Out, &[&self._swdio]);
 
@@ -278,7 +278,7 @@ impl<'d> Probe<'d> {
         self._swclk.set_pull(Pull::None);
         self.sm.set_pin_dirs(Direction::In, &[&self._swclk]);
         Timer::after_micros(150).await;
-        let clk = (embassy_rp::pac::SIO.gpio_in(0).read() >> crate::board::PIN_SWCLK) & 1 == 0;
+        let clk = (embassy_rp::pac::SIO.gpio_in(0).read() >> crate::board::CONFIG.pins.swclk) & 1 == 0;
         self.sm.set_pin_dirs(Direction::Out, &[&self._swclk]);
         self.sm.set_pins(Level::Low, &[&self._swclk]); // 還原（idle 低）
 

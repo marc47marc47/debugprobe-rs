@@ -89,11 +89,11 @@ async fn main(spawner: Spawner) {
 
     // --- AutoBaud（PIO1 量測 UART RX 邊緣，魔術 baud 9728 觸發）---
     let pio1 = Pio::new(p.PIO1, Irqs);
-    let ab = autobaud::AutoBaud::new(pio1.common, pio1.sm0, board::UART_RX);
+    let ab = autobaud::AutoBaud::new(pio1.common, pio1.sm0, board::CONFIG.uart.rx);
 
     // --- UART 橋接 (UART1, GPIO4/5) ---
     let mut uart_cfg = embassy_rp::uart::Config::default();
-    uart_cfg.baudrate = board::UART_BAUDRATE;
+    uart_cfg.baudrate = board::CONFIG.uart.baudrate;
     static UART_TX_BUF: StaticCell<[u8; 256]> = StaticCell::new();
     static UART_RX_BUF: StaticCell<[u8; 256]> = StaticCell::new();
     let bridge_uart = BufferedUart::new(
@@ -113,7 +113,7 @@ async fn main(spawner: Spawner) {
     // 邏輯擷取：用 PIO0 SM1 + DMA 取樣 SWCLK/SWDIO（in_base=SWCLK，SWDIO 須為其 +1）。
     // 須在 pio_common 移入 Probe 前載入擷取程式。
     let cap_dma = embassy_rp::dma::Channel::new(p.DMA_CH0, Irqs);
-    let cap = logic::LogicCapture::new(&mut pio_common, pio.sm1, cap_dma, board::PIN_SWCLK);
+    let cap = logic::LogicCapture::new(&mut pio_common, pio.sm1, cap_dma, board::CONFIG.pins.swclk);
     #[cfg(feature = "board-debug-probe")]
     let (swclk, swdio, swdi, reset) = (
         pio_common.make_pio_pin(p.PIN_12),

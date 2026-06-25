@@ -74,7 +74,7 @@ impl<'d> Dap<'d> {
         let id = req[1];
         match id {
             INFO_VENDOR => put_str(resp, "Raspberry Pi"),
-            INFO_PRODUCT => put_str(resp, board::PRODUCT_STRING),
+            INFO_PRODUCT => put_str(resp, board::CONFIG.product),
             INFO_SERIAL => put_str(resp, self.serial),
             INFO_FW_VER => put_str(resp, FW_VERSION),
             INFO_CAPABILITIES => {

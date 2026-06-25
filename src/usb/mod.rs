@@ -81,7 +81,7 @@ pub fn build(
     // --- Device descriptor（對應 C desc_device）---
     let mut config = Config::new(USB_VID, USB_PID);
     config.manufacturer = Some(USB_MANUFACTURER);
-    config.product = Some(board::PRODUCT_STRING);
+    config.product = Some(board::CONFIG.product);
     config.serial_number = Some(serial);
     config.device_release = USB_DEVICE_RELEASE;
     config.max_packet_size_0 = USB_EP0_SIZE;
