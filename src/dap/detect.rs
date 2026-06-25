@@ -11,19 +11,34 @@ impl<'d> Dap<'d> {
         self.probe.write_bits(32, 0xFFFF_FFFF).await; // 共 64 高，足夠
     }
 
-    /// 喚醒單核 DP：JTAG→SWD 切換（0xE79E）+ line reset + 讀 DPIDR。讀到回 true。
+    /// 喚醒單核 DP：JTAG→SWD 切換 + line reset（`swd_wakeup`）+ 讀 DPIDR。讀到回 true。
     /// 刻意**只用 JTAG-switch**（不送 dormant 序列，避免把單核目標誤推進 dormant 態）。
     async fn swd_connect(&mut self) -> bool {
-        self.line_reset().await;
-        self.probe.write_bits(16, 0xE79E).await;
-        self.line_reset().await;
-        self.probe.write_bits(8, 0).await;
+        self.swd_wakeup().await;
         self.swd_read_dpidr().await
     }
 
-    /// 讀 CPUID(0xE000ED00) 的 PARTNO(bits[15:4])（A：通用 Cortex-M 核心辨識）；失敗回 0。
+    /// debug powerup：清 sticky → SELECT=0 → CTRL/STAT PWRUPREQ → 輪詢 powerup ACK。成功回 true。
+    /// （detect_target 與 link_quality 共用，取代原本兩處逐字重複的序列。）
+    async fn debug_powerup(&mut self) -> bool {
+        let _ = self.transfer_retry(DP_ABORT_WR, reg::DP_ABORT_CLEAR).await; // 清 sticky error
+        let _ = self.transfer_retry(DP_SELECT_WR, 0).await; // SELECT = 0（APSEL0, bank0）
+        let _ = self
+            .transfer_retry(DP_CTRLSTAT_WR, reg::CTRLSTAT_PWRUPREQ)
+            .await; // CSYS/CDBG PWRUPREQ
+        // 輪詢 powerup ACK（CDBGPWRUPACK bit29 | CSYSPWRUPACK bit31）後才能存取 AP。
+        for _ in 0..20 {
+            let (ack, v) = self.transfer_retry(DP_CTRLSTAT_RD, 0).await;
+            if ack == Ack::Ok && (v & reg::CTRLSTAT_PWRUPACK) == reg::CTRLSTAT_PWRUPACK {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 讀 CPUID 的 PARTNO(bits[15:4])（A：通用 Cortex-M 核心辨識）；失敗回 0。
     async fn read_cpuid_part(&mut self) -> u16 {
-        match self.read_mem32(0xE000_ED00).await {
+        match self.read_mem32(reg::CPUID).await {
             Some(v) => ((v >> 4) & 0xFFF) as u16,
             None => 0,
         }
@@ -32,7 +47,7 @@ impl<'d> Dap<'d> {
     /// 經 AHB-AP 讀一個 32-bit 記憶體字（posted read + RDBUFF）。全程 WAIT 重試。
     async fn read_mem32(&mut self, addr: u32) -> Option<u32> {
         // AP CSW = 32-bit word、single（probe-rs/openocd 對 STM32 常用值）
-        if self.transfer_retry(AP_CSW_WR, 0x2300_0052).await.0 != Ack::Ok {
+        if self.transfer_retry(AP_CSW_WR, reg::AP_CSW_32BIT).await.0 != Ack::Ok {
             return None;
         }
         // AP TAR = addr
@@ -56,20 +71,7 @@ impl<'d> Dap<'d> {
         if !self.swd_connect().await {
             return None;
         }
-        let _ = self.transfer_retry(DP_ABORT_WR, 0x1E).await; // DP ABORT：清 sticky error
-        let _ = self.transfer_retry(DP_SELECT_WR, 0).await; // DP SELECT = 0（APSEL0, bank0）
-        let _ = self.transfer_retry(DP_CTRLSTAT_WR, 0x5000_0000).await; // CTRL/STAT：CSYS/CDBG PWRUPREQ
-
-        // 輪詢 powerup ACK（CDBGPWRUPACK bit29 | CSYSPWRUPACK bit31）後才能存取 AP。
-        let mut powered = false;
-        for _ in 0..20 {
-            let (ack, v) = self.transfer_retry(DP_CTRLSTAT_RD, 0).await; // DP read CTRL/STAT
-            if ack == Ack::Ok && (v & 0xA000_0000) == 0xA000_0000 {
-                powered = true;
-                break;
-            }
-        }
-        if !powered {
+        if !self.debug_powerup().await {
             return None;
         }
 
@@ -83,8 +85,8 @@ impl<'d> Dap<'d> {
         let mut rdp = RdpLevel::Unknown;
 
         if designer == JEP_ST || designer == 0 {
-            // ST / GD32：DBGMCU_IDCODE @ 0xE0042000，DEV_ID = bits[11:0]，再讀 RDP。
-            if let Some(v) = self.read_mem32(0xE004_2000).await {
+            // ST / GD32：DBGMCU_IDCODE，DEV_ID = bits[11:0]，再讀 RDP。
+            if let Some(v) = self.read_mem32(reg::DBGMCU_IDCODE).await {
                 let d = (v & 0xFFF) as u16;
                 if d != 0 && d != 0xFFF {
                     devid = d;
@@ -92,8 +94,8 @@ impl<'d> Dap<'d> {
                 }
             }
         } else if designer == JEP_NORDIC {
-            // Nordic：FICR.INFO.PART @ 0x10000100（如 0x52832）。
-            part = self.read_mem32(0x1000_0100).await.unwrap_or(0);
+            // Nordic：FICR.INFO.PART（如 0x52832）。
+            part = self.read_mem32(reg::NORDIC_FICR_PART).await.unwrap_or(0);
         }
 
         // 已通過 DPIDR+powerup，目標確實存在；即使廠商/型號未知也回報（OLED 至少顯示核心）。
@@ -115,10 +117,7 @@ impl<'d> Dap<'d> {
     ///
     /// 僅應在 host 未使用 DAP 時呼叫（會做 line reset）。
     pub async fn link_quality(&mut self) -> LinkQuality {
-        self.line_reset().await;
-        self.probe.write_bits(16, 0xE79E).await;
-        self.line_reset().await;
-        self.probe.write_bits(8, 0).await;
+        self.swd_wakeup().await;
 
         // DP：連讀 16× DPIDR，與第一筆一致（且非全 0/全 1）才算成功。
         let mut dp_ok = 0u8;
@@ -140,28 +139,17 @@ impl<'d> Dap<'d> {
             return LinkQuality { dp: 0, ap: 0 };
         }
 
-        // debug powerup（同 detect_target）。
-        let _ = self.transfer_retry(DP_ABORT_WR, 0x1E).await; // ABORT 清 sticky
-        let _ = self.transfer_retry(DP_SELECT_WR, 0).await; // SELECT=0
-        let _ = self.transfer_retry(DP_CTRLSTAT_WR, 0x5000_0000).await; // CTRL/STAT powerup
-        let mut powered = false;
-        for _ in 0..20 {
-            let (ack, v) = self.transfer_retry(DP_CTRLSTAT_RD, 0).await;
-            if ack == Ack::Ok && (v & 0xA000_0000) == 0xA000_0000 {
-                powered = true;
-                break;
-            }
-        }
-        if !powered {
+        // debug powerup（同 detect_target，共用 helper）。
+        if !self.debug_powerup().await {
             return LinkQuality { dp: dp_ok, ap: 0 };
         }
 
-        // AP：連讀 16× DBGMCU_IDCODE @0xE0042000，非 0 且一致才算成功。
+        // AP：連讀 16× DBGMCU_IDCODE，非 0 且一致才算成功。
         let mut ap_ok = 0u8;
         let mut ap_ref = 0u32;
         let mut have_ap = false;
         for _ in 0..16 {
-            let Some(v) = self.read_mem32(0xE004_2000).await else {
+            let Some(v) = self.read_mem32(reg::DBGMCU_IDCODE).await else {
                 continue;
             };
             if v == 0 {
@@ -180,9 +168,9 @@ impl<'d> Dap<'d> {
 
     /// 讀 CoreSight ROM table(0xE00FF000) 的 PIDR，取 JEP106 廠商碼（cc<<7|id）；失敗回 0。
     async fn read_designer(&mut self) -> u16 {
-        let p1 = self.read_mem32(0xE00F_FFE4).await; // PIDR1
-        let p2 = self.read_mem32(0xE00F_FFE8).await; // PIDR2
-        let p4 = self.read_mem32(0xE00F_FFD0).await; // PIDR4
+        let p1 = self.read_mem32(reg::ROM_PIDR1).await;
+        let p2 = self.read_mem32(reg::ROM_PIDR2).await;
+        let p4 = self.read_mem32(reg::ROM_PIDR4).await;
         match (p1, p2, p4) {
             (Some(p1), Some(p2), Some(p4)) => {
                 let id = ((p2 & 0x7) << 4) | ((p1 >> 4) & 0xF); // 7-bit JEP106 id
@@ -202,16 +190,16 @@ impl<'d> Dap<'d> {
             _ => RdpLevel::Level1,
         };
         match rdp_reg(devid) {
-            RdpReg::Optcr => match self.read_mem32(0x4002_3C14).await {
+            RdpReg::Optcr => match self.read_mem32(reg::FLASH_OPTCR).await {
                 Some(v) => rdp_byte(((v >> 8) & 0xFF) as u8),
                 None => RdpLevel::Unknown,
             },
-            RdpReg::Obr => match self.read_mem32(0x4002_201C).await {
+            RdpReg::Obr => match self.read_mem32(reg::FLASH_OBR).await {
                 Some(v) if v & 0x2 != 0 => RdpLevel::Level1,
                 Some(_) => RdpLevel::Open,
                 None => RdpLevel::Unknown,
             },
-            RdpReg::Optr => match self.read_mem32(0x4002_2020).await {
+            RdpReg::Optr => match self.read_mem32(reg::FLASH_OPTR).await {
                 Some(v) => rdp_byte((v & 0xFF) as u8),
                 None => RdpLevel::Unknown,
             },

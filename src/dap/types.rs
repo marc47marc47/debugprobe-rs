@@ -247,3 +247,28 @@ pub(crate) fn u32_le(b: &[u8]) -> u32 {
 pub(crate) fn put_u32_le(b: &mut [u8], v: u32) {
     b[..4].copy_from_slice(&v.to_le_bytes());
 }
+
+/// 自主偵測會存取的目標暫存器位址與 SWD 控制字（集中散落的魔術數）。
+pub(crate) mod reg {
+    /// CPUID（PARTNO bits[15:4]）。
+    pub const CPUID: u32 = 0xE000_ED00;
+    /// STM32/GD32 DBGMCU_IDCODE（DEV_ID bits[11:0]）。
+    pub const DBGMCU_IDCODE: u32 = 0xE004_2000;
+    /// CoreSight ROM table PIDR1/PIDR2/PIDR4（組 JEP106 廠商碼）。
+    pub const ROM_PIDR1: u32 = 0xE00F_FFE4;
+    pub const ROM_PIDR2: u32 = 0xE00F_FFE8;
+    pub const ROM_PIDR4: u32 = 0xE00F_FFD0;
+    /// Nordic FICR.INFO.PART。
+    pub const NORDIC_FICR_PART: u32 = 0x1000_0100;
+    /// RDP option 暫存器（依家族）。
+    pub const FLASH_OPTCR: u32 = 0x4002_3C14;
+    pub const FLASH_OBR: u32 = 0x4002_201C;
+    pub const FLASH_OPTR: u32 = 0x4002_2020;
+    /// AP CSW：32-bit word、single（probe-rs/openocd 對 STM32 常用值）。
+    pub const AP_CSW_32BIT: u32 = 0x2300_0052;
+    /// CTRL/STAT：CSYS|CDBG PWRUPREQ（寫）/ PWRUPACK（輪詢判讀）。
+    pub const CTRLSTAT_PWRUPREQ: u32 = 0x5000_0000;
+    pub const CTRLSTAT_PWRUPACK: u32 = 0xA000_0000;
+    /// DP ABORT：清 sticky error（STKCMP/STKERR/WDERR/ORUNERR）。
+    pub const DP_ABORT_CLEAR: u32 = 0x1E;
+}

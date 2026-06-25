@@ -342,7 +342,7 @@
 - [x] **R1** 純死碼清除：移除 `Dap.match_retry`、probe `read_mode`/`write_mode`/`wait_idle`/`deinit`/
   `Cmd::Skip`/`CmdAddrs.get_next`；`common`→`_common`（held-for-ownership）；拿掉 probe `#![allow(dead_code)]`。
 - [x] **R2** dap 拆模組：`dap/{types,regs,commands,swd,detect}.rs`（純搬家 + re-export）。
-- [ ] **R3** dap 去重：`swd_wakeup` 複用、`debug_powerup`、`count_stable`、魔術數入 `dap::reg`。
+- [x] **R3** dap 去重：`swd_wakeup` 複用、`debug_powerup`、`count_stable`、魔術數入 `dap::reg`。
 - [ ] **R4** main 拆 `state.rs`/`chipdb.rs`/`wiring.rs`（純搬家）。
 - [ ] **R5** main 拆 `scan.rs`/`tasks.rs`；`count_signal` 入 `logic.rs`。
 - [ ] **R6** newtype：`ClockKHz`/`LineStatus`/`SignalStats`/`ScanState`/`HostActivity`；link 併回 `LinkQuality`。
