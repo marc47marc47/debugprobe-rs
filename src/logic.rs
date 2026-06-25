@@ -90,7 +90,15 @@ pub fn sample_at(buf: &[u32], idx: usize) -> (bool, bool) {
 }
 
 /// 數擷取窗內 SWCLK/SWDIO 的邊緣(跳變)數與高電位取樣數。回 (clk_e, dio_e, clk_hi, dio_hi)。
-pub(crate) fn count_signal(buf: &[u32]) -> (u32, u32, u32, u32) {
+/// 一次擷取窗的訊號統計（取代裸 `(u32,u32,u32,u32)` 四元組）。
+pub(crate) struct SignalStats {
+    pub clk_edges: u32,
+    pub dio_edges: u32,
+    pub clk_hi: u32,
+    pub dio_hi: u32,
+}
+
+pub(crate) fn count_signal(buf: &[u32]) -> SignalStats {
     let (mut pc, mut pd) = sample_at(buf, 0);
     let (mut ce, mut de) = (0u32, 0u32);
     let (mut ch, mut dh) = (pc as u32, pd as u32); // 取樣 0 的高電位計入
@@ -111,5 +119,10 @@ pub(crate) fn count_signal(buf: &[u32]) -> (u32, u32, u32, u32) {
             dh += 1;
         }
     }
-    (ce, de, ch, dh)
+    SignalStats {
+        clk_edges: ce,
+        dio_edges: de,
+        clk_hi: ch,
+        dio_hi: dh,
+    }
 }

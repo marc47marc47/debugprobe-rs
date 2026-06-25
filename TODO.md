@@ -345,7 +345,7 @@
 - [x] **R3** dap 去重：`swd_wakeup` 複用、`debug_powerup`、`count_stable`、魔術數入 `dap::reg`。
 - [x] **R4** main 拆 `state.rs`/`chipdb.rs`/`wiring.rs`（純搬家）。
 - [x] **R5** main 拆 `scan.rs`/`tasks.rs`；`count_signal` 入 `logic.rs`。
-- [ ] **R6** newtype：`ClockKHz`/`LineStatus`/`SignalStats`/`ScanState`/`HostActivity`；link 併回 `LinkQuality`。
+- [x] **R6** newtype：`ClockKHz`/`LineStatus`/`SignalStats`/`ScanState`/`HostActivity`；link 併回 `LinkQuality`。
 - [ ] **R7** 周邊：display render 拆子函式 + layout 常數；usb `build()` 拆步驟 + `UsbIds`；uart `BaudCommand`；autobaud `AutoBaudParams`。
 - [ ] **R8** board 結構化：`BoardConfig{Pins,Leds,UartPins}`，三板 `pub const CONFIG`，pico/pico2 去重。
 - [ ] **R9** 測試 bin 去重：建 `src/lib.rs` 共用 `testkit`（OLED+LED+UART setup）。

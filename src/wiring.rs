@@ -78,7 +78,14 @@ pub(crate) const AP_OK: u32 = 14;
 /// 當目標完全沒回應（`used==0`）時 `ce` 會被歸 0，**不可**據此判 SWCLK——那是「no target」，
 /// 原因可能是 GND/供電/RDP，與 SWCLK 無關。`ce` 僅在「有擷取卻幾乎無邊緣」時當「探針驅動死」的輔助。
 #[cfg(feature = "active-detect")]
-pub(crate) fn classify(dio: bool, clk: bool, captured: bool, ce: u32, dp: u32, ap: u32) -> WireVerdict {
+pub(crate) fn classify(
+    lines: crate::state::LineStatus,
+    captured: bool,
+    ce: u32,
+    dp: u32,
+    ap: u32,
+) -> WireVerdict {
+    let crate::state::LineStatus { dio, clk } = lines;
     if !dio && !clk {
         return WireVerdict::BothOpen;
     }

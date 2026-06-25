@@ -33,11 +33,7 @@ pub(crate) async fn dap_task(
     let mut hid_req = [0u8; 64];
     let mut resp = [0u8; 64];
     #[cfg(feature = "active-detect")]
-    let mut absent: u32 = 0; // 連續取樣不到次數（拔除 hysteresis）
-    #[cfg(feature = "active-detect")]
-    let mut sticky_khz: u32 = 1000; // 黏著速率：鎖在上次能通的 SWCLK，避免每輪重掃造成顯示亂跳
-    #[cfg(feature = "active-detect")]
-    let mut prev_lines: Option<(bool, bool)> = None; // 上輪逐線連通（鬆動 flap 統計用）
+    let mut scan_st = crate::scan::ScanState::new(); // 黏著速率/拔除遲滯/鬆動統計持久狀態
     // 走線監測：最後一次收到 host DAP 指令的時間；GUARD 內不監測，保護 F1 燒錄不被擾。
     #[cfg(feature = "wiring-monitor")]
     let mut last_host: Option<Instant> = None;
@@ -112,7 +108,7 @@ pub(crate) async fn dap_task(
             #[cfg(not(feature = "wiring-monitor"))]
             let proceed = true;
             if proceed {
-                idle_scan(&mut dap, &mut cap, &mut sticky_khz, &mut absent, &mut prev_lines).await;
+                idle_scan(&mut dap, &mut cap, &mut scan_st).await;
             }
         }
     }
@@ -125,7 +121,8 @@ pub(crate) async fn oled_task(mut dbg: display::DebugOled, mut led: Output<'stat
         led.toggle();
         let valid = TARGET.valid();
         let verdict = TARGET.verdict();
-        let (dio_c, clk_c) = TARGET.lines(); // 逐線連通（走線監測）
+        let lines = TARGET.lines(); // 逐線連通（走線監測）
+        let (dio_c, clk_c) = (lines.dio, lines.clk);
         // 走線正常(OK/未判定)→ 照常顯示晶片資訊(F2)；有走線問題 → 顯示哪條線壞。
         let show_chip = verdict.shows_chip();
         // 第 1 行：晶片型號 或 走線結論。
@@ -193,8 +190,10 @@ pub(crate) async fn oled_task(mut dbg: display::DebugOled, mut led: Output<'stat
         }
         // 右側 6 條柱狀圖（含 line1/line2 右側）：訊號層 Ce/De/hC/hD + 連線層 DP/AP。
         // Ce0 hC0=SWCLK卡低、Ce0 hC100=卡高、Ce 有長 hC≈50=正常 toggle；DP/AP 往滿=連線品質好。
-        let (ce, de, ch, dh) = TARGET.signal();
-        let (dp, ap) = TARGET.link();
+        let sig = TARGET.signal();
+        let (ce, de, ch, dh) = (sig.clk_edges, sig.dio_edges, sig.clk_hi, sig.dio_hi);
+        let q = TARGET.link();
+        let (dp, ap) = (q.dp as u32, q.ap as u32);
         let s = logic::SAMPLES as u32;
         let bars = [
             display::Bar { label: "Ce", value: ce, max: 64 },

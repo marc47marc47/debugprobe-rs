@@ -1,8 +1,15 @@
 //! 跨 task 共享狀態（TargetShared/WaveRing/事件環/UART 計數）。自 main.rs 抽出（R4）。
 use crate::dap;
-use crate::logic;
+use crate::logic::{self, SignalStats};
 use crate::wiring::WireVerdict;
 use portable_atomic::{AtomicU8, AtomicU32, Ordering};
+
+/// 逐線連通狀態（取代裸 `(bool, bool)`）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LineStatus {
+    pub dio: bool,
+    pub clk: bool,
+}
 
 // 跨 task 共享狀態（非阻塞 atomic）。事件用 token ring（環形緩衝，最新覆蓋最舊、無溢出）。
 pub(crate) const EVT_N: usize = 3; // 環深度（配合 OLED 顯示行數）
@@ -75,16 +82,15 @@ impl TargetShared {
         }
     }
     /// 記錄逐線連通結果。
-    pub(crate) fn set_lines(&self, dio: bool, clk: bool) {
-        self.dio_conn.store(dio as u8, Ordering::Relaxed);
-        self.clk_conn.store(clk as u8, Ordering::Relaxed);
+    pub(crate) fn set_lines(&self, l: LineStatus) {
+        self.dio_conn.store(l.dio as u8, Ordering::Relaxed);
+        self.clk_conn.store(l.clk as u8, Ordering::Relaxed);
     }
-    /// 回 (dio_connected, clk_connected)。
-    pub(crate) fn lines(&self) -> (bool, bool) {
-        (
-            self.dio_conn.load(Ordering::Relaxed) != 0,
-            self.clk_conn.load(Ordering::Relaxed) != 0,
-        )
+    pub(crate) fn lines(&self) -> LineStatus {
+        LineStatus {
+            dio: self.dio_conn.load(Ordering::Relaxed) != 0,
+            clk: self.clk_conn.load(Ordering::Relaxed) != 0,
+        }
     }
     pub(crate) fn set_verdict(&self, v: WireVerdict) {
         self.verdict.store(v.to_u8(), Ordering::Relaxed);
@@ -113,20 +119,19 @@ impl TargetShared {
         self.probe_khz.load(Ordering::Relaxed)
     }
     /// 記錄上一窗 SWCLK/SWDIO 的邊緣數與高電位取樣數。
-    pub(crate) fn set_signal(&self, clk_e: u32, dio_e: u32, clk_hi: u32, dio_hi: u32) {
-        self.clk_edges.store(clk_e, Ordering::Relaxed);
-        self.dio_edges.store(dio_e, Ordering::Relaxed);
-        self.clk_hi.store(clk_hi, Ordering::Relaxed);
-        self.dio_hi.store(dio_hi, Ordering::Relaxed);
+    pub(crate) fn set_signal(&self, s: SignalStats) {
+        self.clk_edges.store(s.clk_edges, Ordering::Relaxed);
+        self.dio_edges.store(s.dio_edges, Ordering::Relaxed);
+        self.clk_hi.store(s.clk_hi, Ordering::Relaxed);
+        self.dio_hi.store(s.dio_hi, Ordering::Relaxed);
     }
-    /// 回 (clk邊緣, dio邊緣, clk高取樣, dio高取樣)。
-    pub(crate) fn signal(&self) -> (u32, u32, u32, u32) {
-        (
-            self.clk_edges.load(Ordering::Relaxed),
-            self.dio_edges.load(Ordering::Relaxed),
-            self.clk_hi.load(Ordering::Relaxed),
-            self.dio_hi.load(Ordering::Relaxed),
-        )
+    pub(crate) fn signal(&self) -> SignalStats {
+        SignalStats {
+            clk_edges: self.clk_edges.load(Ordering::Relaxed),
+            dio_edges: self.dio_edges.load(Ordering::Relaxed),
+            clk_hi: self.clk_hi.load(Ordering::Relaxed),
+            dio_hi: self.dio_hi.load(Ordering::Relaxed),
+        }
     }
     /// 寫入偵測結果（designer/part/flash 先寫，devid 含有效旗標最後寫）。
     pub(crate) fn store(&self, info: &dap::TargetInfo) {
@@ -170,12 +175,12 @@ impl TargetShared {
         self.link_dp.store(q.dp as u32, Ordering::Relaxed);
         self.link_ap.store(q.ap as u32, Ordering::Relaxed);
     }
-    /// (dp, ap) 成功數。
-    pub(crate) fn link(&self) -> (u32, u32) {
-        (
-            self.link_dp.load(Ordering::Relaxed),
-            self.link_ap.load(Ordering::Relaxed),
-        )
+    /// 連線品質（dp/ap 成功數，0..=16）。
+    pub(crate) fn link(&self) -> dap::LinkQuality {
+        dap::LinkQuality {
+            dp: self.link_dp.load(Ordering::Relaxed) as u8,
+            ap: self.link_ap.load(Ordering::Relaxed) as u8,
+        }
     }
 }
 
