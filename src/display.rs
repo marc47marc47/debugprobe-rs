@@ -80,67 +80,96 @@ impl DebugOled {
     pub fn render(&mut self, m: &OledModel) {
         let Some(o) = &mut self.oled else { return };
         let _ = o.clear(BinaryColor::Off);
-        let text = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
-        let stroke = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
-
-        // 上方文字 2 行（晶片 / 可燒狀態）。
-        for (i, line) in [m.chip, m.flash].iter().enumerate() {
-            let y = (i as i32) * 12;
-            let _ = Text::with_baseline(line, Point::new(0, y), text, Baseline::Top).draw(o);
-        }
-
-        // 下方兩通道方波（縮窄到左側 x=8..78，右側讓給柱狀圖）：C(SWCLK) y≈26..34、D(SWDIO) y≈42..50。
-        const COLS: i32 = 70; // 波形 70 欄（x=8..78）
-        // 第 c 欄 → ring 索引 (pos + c) % 128（pos=最舊,故由舊到新、向左捲動）。
-        let rbit = |arr: &[u32; 4], c: i32| {
-            let rc = (m.pos as i32 + c).rem_euclid(128) as usize;
-            (arr[rc / 32] >> (rc % 32)) & 1 != 0
-        };
-        for (lbl, arr, hi) in [("C", &m.clk, 26i32), ("D", &m.dio, 42i32)] {
-            let lo = hi + 8;
-            let _ = Text::with_baseline(lbl, Point::new(0, hi - 1), text, Baseline::Top).draw(o);
-            let lvl = |b: bool| if b { hi } else { lo };
-            for c in 0..COLS {
-                let x = 8 + c;
-                let yc = lvl(rbit(arr, c));
-                let _ = Line::new(Point::new(x, yc), Point::new(x + 1, yc))
-                    .into_styled(stroke)
-                    .draw(o); // 水平段
-                if c > 0 && rbit(arr, c) != rbit(arr, c - 1) {
-                    let yp = lvl(rbit(arr, c - 1));
-                    let _ = Line::new(Point::new(x, yp), Point::new(x, yc))
-                        .into_styled(stroke)
-                        .draw(o); // 跳變垂直連接
-                }
-            }
-        }
-        // 左下角：連線品質文字 DP/AP（y=53）。
-        let _ = Text::with_baseline(m.scale, Point::new(0, 53), text, Baseline::Top).draw(o);
-
-        // 右側柱狀圖面板（x=82..127，含 line1/line2 右側）：每條 label(≤2字) + 長度 = value/max 的橫條。
-        const PANEL_X: i32 = 82;
-        const BAR_X0: i32 = 96; // 條起點（label 後）
-        const BAR_W: u32 = 30; // 條最大寬（96..126）
-        let fill = PrimitiveStyle::with_fill(BinaryColor::On);
-        for (i, b) in m.bars.iter().take(6).enumerate() {
-            let y = 2 + i as i32 * 10; // 6 條：y=2,12,22,32,42,52（用到右上 line1/line2 高度）
-            let _ = Text::with_baseline(b.label, Point::new(PANEL_X, y - 1), text, Baseline::Top)
-                .draw(o);
-            // 外框
-            let _ = Rectangle::new(Point::new(BAR_X0, y), Size::new(BAR_W, 7))
-                .into_styled(stroke)
-                .draw(o);
-            // 填充長度 = value/max
-            let w = (b.value.min(b.max) * BAR_W).checked_div(b.max).unwrap_or(0);
-            if w > 0 {
-                let _ = Rectangle::new(Point::new(BAR_X0, y), Size::new(w, 7))
-                    .into_styled(fill)
-                    .draw(o);
-            }
-        }
+        draw_header(o, m);
+        draw_waveforms(o, m);
+        draw_bars(o, m);
         // flush 失敗（如 GND 熱拔造成 I2C 突波/SSD1306 異常）→ 重新 init，使 OLED 自癒。
         if o.flush().is_err() {
             let _ = o.init();
+        }
+    }
+}
+
+/// OLED 版面常數（128x64）。集中座標魔術數。
+mod layout {
+    pub const LINE_H: i32 = 12; // 上方文字行距
+    pub const WAVE_COLS: i32 = 70; // 波形欄數（x=8..78）
+    pub const WAVE_X0: i32 = 8; // 波形起點 x
+    pub const WAVE_CLK_HI: i32 = 26; // SWCLK 高電位 y（低 = +8）
+    pub const WAVE_DIO_HI: i32 = 42; // SWDIO 高電位 y
+    pub const WAVE_AMP: i32 = 8; // 高低差
+    pub const SCALE_Y: i32 = 53; // 左下角狀態文字 y
+    pub const PANEL_X: i32 = 82; // 右側柱狀圖 label x
+    pub const BAR_X0: i32 = 96; // 條起點 x
+    pub const BAR_W: u32 = 30; // 條最大寬
+    pub const BAR_H: u32 = 7; // 條高
+    pub const BAR_Y0: i32 = 2; // 首條 y
+    pub const BAR_DY: i32 = 10; // 條間距
+    pub const BARS_MAX: usize = 6; // 最多條數
+}
+
+/// 上方文字 2 行（晶片 / 可燒狀態）。
+fn draw_header(o: &mut Oled, m: &OledModel) {
+    let text = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+    for (i, line) in [m.chip, m.flash].iter().enumerate() {
+        let y = (i as i32) * layout::LINE_H;
+        let _ = Text::with_baseline(line, Point::new(0, y), text, Baseline::Top).draw(o);
+    }
+}
+
+/// 下方兩通道方波（C=SWCLK / D=SWDIO，token-ring 捲動）+ 左下角狀態文字。
+fn draw_waveforms(o: &mut Oled, m: &OledModel) {
+    let text = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+    let stroke = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
+    // 第 c 欄 → ring 索引 (pos + c) % 128（pos=最舊,故由舊到新、向左捲動）。
+    let rbit = |arr: &[u32; 4], c: i32| {
+        let rc = (m.pos as i32 + c).rem_euclid(128) as usize;
+        (arr[rc / 32] >> (rc % 32)) & 1 != 0
+    };
+    for (lbl, arr, hi) in [
+        ("C", &m.clk, layout::WAVE_CLK_HI),
+        ("D", &m.dio, layout::WAVE_DIO_HI),
+    ] {
+        let lo = hi + layout::WAVE_AMP;
+        let _ = Text::with_baseline(lbl, Point::new(0, hi - 1), text, Baseline::Top).draw(o);
+        let lvl = |b: bool| if b { hi } else { lo };
+        for c in 0..layout::WAVE_COLS {
+            let x = layout::WAVE_X0 + c;
+            let yc = lvl(rbit(arr, c));
+            let _ = Line::new(Point::new(x, yc), Point::new(x + 1, yc))
+                .into_styled(stroke)
+                .draw(o); // 水平段
+            if c > 0 && rbit(arr, c) != rbit(arr, c - 1) {
+                let yp = lvl(rbit(arr, c - 1));
+                let _ = Line::new(Point::new(x, yp), Point::new(x, yc))
+                    .into_styled(stroke)
+                    .draw(o); // 跳變垂直連接
+            }
+        }
+    }
+    let _ = Text::with_baseline(m.scale, Point::new(0, layout::SCALE_Y), text, Baseline::Top).draw(o);
+}
+
+/// 右側柱狀圖面板：每條 label(≤2字) + 長度 = value/max 的橫條。
+fn draw_bars(o: &mut Oled, m: &OledModel) {
+    let text = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+    let stroke = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
+    let fill = PrimitiveStyle::with_fill(BinaryColor::On);
+    for (i, b) in m.bars.iter().take(layout::BARS_MAX).enumerate() {
+        let y = layout::BAR_Y0 + i as i32 * layout::BAR_DY;
+        let _ =
+            Text::with_baseline(b.label, Point::new(layout::PANEL_X, y - 1), text, Baseline::Top)
+                .draw(o);
+        let _ = Rectangle::new(Point::new(layout::BAR_X0, y), Size::new(layout::BAR_W, layout::BAR_H))
+            .into_styled(stroke)
+            .draw(o);
+        let w = (b.value.min(b.max) * layout::BAR_W)
+            .checked_div(b.max)
+            .unwrap_or(0);
+        if w > 0 {
+            let _ = Rectangle::new(Point::new(layout::BAR_X0, y), Size::new(w, layout::BAR_H))
+                .into_styled(fill)
+                .draw(o);
         }
     }
 }

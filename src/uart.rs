@@ -17,6 +17,28 @@ use embedded_io_async::{Read, Write};
 use crate::autobaud::{AutoBaud, MAGIC_BAUD};
 use crate::usbdev::ProbeDriver;
 
+/// CDC line-coding 變更後該對 UART 做什麼（取代散落的 if/else 判斷）。
+enum BaudCommand {
+    /// 魔術 baud（9728）→ 量測目標 RX 邊緣自動偵測。
+    Auto,
+    /// 一般 baud → 直接套用。
+    Fixed(u32),
+    /// baud=0 → 忽略。
+    Ignore,
+}
+
+impl BaudCommand {
+    fn from_rate(baud: u32) -> Self {
+        if baud == MAGIC_BAUD {
+            Self::Auto
+        } else if baud > 0 {
+            Self::Fixed(baud)
+        } else {
+            Self::Ignore
+        }
+    }
+}
+
 #[embassy_executor::task]
 pub async fn uart_bridge_task(
     class: CdcAcmClass<'static, ProbeDriver>,
@@ -65,14 +87,15 @@ pub async fn uart_bridge_task(
             }
         }
         if changed {
-            let baud = receiver.line_coding().data_rate();
-            if baud == MAGIC_BAUD {
+            match BaudCommand::from_rate(receiver.line_coding().data_rate()) {
                 // AutoBaud：量測目標 UART RX 的邊緣，偵測出真正的 baud 再套用。
-                if let Some(detected) = autobaud.detect().await {
-                    uart.set_baudrate(detected);
+                BaudCommand::Auto => {
+                    if let Some(detected) = autobaud.detect().await {
+                        uart.set_baudrate(detected);
+                    }
                 }
-            } else if baud > 0 {
-                uart.set_baudrate(baud);
+                BaudCommand::Fixed(baud) => uart.set_baudrate(baud),
+                BaudCommand::Ignore => {}
             }
         }
     }

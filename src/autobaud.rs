@@ -22,6 +22,13 @@ use fixed::types::extra::U8;
 /// 觸發 AutoBaud 的魔術 baud（對應 C 的 MAGIC_BAUD 0x2600）。
 pub const MAGIC_BAUD: u32 = 9728;
 
+// AutoBaud 調校參數（集中散落的魔術數，實機可微調）。
+const SAMPLE_CAP: usize = 512; // 邊緣間隔樣本上限
+const COLLECT_MS: u64 = 400; // 收集時間（ms）
+const TOL_DIV: u32 = 20; // 容差 = s/TOL_DIV（±5%）
+const MIN_REPEAT: usize = 3; // 視為「1 bit time」需重複出現的最少次數
+const MIN_SAMPLES: usize = 8; // 樣本太少不估
+
 pub struct AutoBaud<'d> {
     sm: StateMachine<'d, PIO1, 0>,
     _common: Common<'d, PIO1>,
@@ -75,7 +82,7 @@ impl<'d> AutoBaud<'d> {
         self.sm.set_enable(true);
         while self.sm.rx().try_pull().is_some() {} // 清舊資料
 
-        let mut samples: heapless::Vec<u32, 512> = heapless::Vec::new();
+        let mut samples: heapless::Vec<u32, SAMPLE_CAP> = heapless::Vec::new();
         let collect = async {
             loop {
                 let raw = self.sm.rx().wait_pull().await;
@@ -88,7 +95,7 @@ impl<'d> AutoBaud<'d> {
                 }
             }
         };
-        let _ = select(Timer::after(Duration::from_millis(400)), collect).await;
+        let _ = select(Timer::after(Duration::from_millis(COLLECT_MS)), collect).await;
         self.sm.set_enable(false);
 
         estimate(&samples, self.pio_clk)
@@ -97,17 +104,17 @@ impl<'d> AutoBaud<'d> {
 
 /// 最短且重複出現（±5%）至少 3 次的間隔視為 1 bit time，換算 baud。
 fn estimate(samples: &[u32], pio_clk: u32) -> Option<u32> {
-    if samples.len() < 8 {
+    if samples.len() < MIN_SAMPLES {
         return None;
     }
     let mut best: Option<u32> = None;
     for &s in samples {
-        let tol = (s / 20) as i64; // ±5%
+        let tol = (s / TOL_DIV) as i64; // ±5%
         let count = samples
             .iter()
             .filter(|&&x| (x as i64 - s as i64).abs() <= tol)
             .count();
-        if count >= 3 {
+        if count >= MIN_REPEAT {
             best = Some(best.map_or(s, |b| b.min(s)));
         }
     }

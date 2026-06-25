@@ -53,6 +53,13 @@ const DEVICE_INTERFACE_GUID: &str = "{CDB3B5AD-293B-4663-AA36-1AAE46463776}";
 /// MS OS 2.0 vendor request code（對應 C `tud_vendor_control_xfer_cb` 的 bRequest == 1）。
 pub const MSOS_VENDOR_CODE: u8 = 0x01;
 
+/// USB 裝置識別常數（集中散落的魔術數）。
+const USB_VID: u16 = 0x2e8a; // Raspberry Pi
+const USB_PID: u16 = 0x000c; // CMSIS-DAP
+const USB_MANUFACTURER: &str = "Raspberry Pi";
+const USB_DEVICE_RELEASE: u16 = 0x0231; // bcdDevice 02.31
+const USB_EP0_SIZE: u8 = 64;
+
 /// embassy-usb Builder 需要的 'static 緩衝區。
 struct UsbBuffers {
     config_descriptor: [u8; 256],
@@ -72,12 +79,12 @@ pub fn build(
     CdcAcmClass<'static, ProbeDriver>,
 ) {
     // --- Device descriptor（對應 C desc_device）---
-    let mut config = Config::new(0x2e8a, 0x000c); // VID Raspberry Pi / PID CMSIS-DAP
-    config.manufacturer = Some("Raspberry Pi");
+    let mut config = Config::new(USB_VID, USB_PID);
+    config.manufacturer = Some(USB_MANUFACTURER);
     config.product = Some(board::PRODUCT_STRING);
     config.serial_number = Some(serial);
-    config.device_release = 0x0231; // bcdDevice 02.31
-    config.max_packet_size_0 = 64;
+    config.device_release = USB_DEVICE_RELEASE;
+    config.max_packet_size_0 = USB_EP0_SIZE;
     // 複合裝置（DAP vendor + CDC）需 IAD；embassy 要求對應的
     // Miscellaneous/Common/IAD 裝置類別 0xEF/0x02/0x01。
     config.device_class = 0xEF;
