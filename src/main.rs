@@ -606,21 +606,31 @@ const DP_OK: u32 = 14; // OK 門檻
 #[cfg(feature = "active-detect")]
 const AP_OK: u32 = 14;
 
-/// 依逐線連通 (dio,clk) + SWCLK 邊緣 ce + 連線品質 (dp,ap) 判定「哪條線/什麼問題」。
-/// 短路順序：先判最確定的斷線，再判讀不到/供電/共地/抖動，最後才 OK。
+/// 依逐線連通 (dio,clk) + 連線品質 (dp,ap) 判定「哪條線/什麼問題」。
+///
+/// 重點：**SWCLK 是否連通以 `probe_lines()` 的 `clk` 為準（讀目標內部下拉）**，而非 `ce`。
+/// `ce`（擷取窗內 SWCLK 邊緣數）只在 `captured`（本輪真的擷取了波形，即 `used!=0`）時才有意義；
+/// 當目標完全沒回應（`used==0`）時 `ce` 會被歸 0，**不可**據此判 SWCLK——那是「no target」，
+/// 原因可能是 GND/供電/RDP，與 SWCLK 無關。`ce` 僅在「有擷取卻幾乎無邊緣」時當「探針驅動死」的輔助。
 #[cfg(feature = "active-detect")]
-fn classify(dio: bool, clk: bool, ce: u32, dp: u32, ap: u32) -> WireVerdict {
+fn classify(dio: bool, clk: bool, captured: bool, ce: u32, dp: u32, ap: u32) -> WireVerdict {
     if !dio && !clk {
         return WireVerdict::BothOpen;
     }
-    if !clk || ce < EDGE_MIN {
-        return WireVerdict::SwclkOpen; // 不連通，或探針驅出後幾乎無邊緣 → 虛接
+    if !clk {
+        return WireVerdict::SwclkOpen; // probe_lines：SWCLK 線實體不連通
     }
     if !dio {
         return WireVerdict::SwdioOpen;
     }
+    // 兩線都連通 → 改以實際 SWD 交易品質判定。
     if dp == 0 {
-        return WireVerdict::NoTarget; // 兩線連通、SWCLK 在動，但完全讀不到 DP
+        // 完全讀不到 DP：只有「本輪有擷取、卻幾乎無 SWCLK 邊緣」才指向探針 SWCLK 驅動死；
+        // 否則據實報 no target（別把 GND/供電/RDP 造成的沉默誤標成 SWCLK BAD）。
+        if captured && ce < EDGE_MIN {
+            return WireVerdict::SwclkOpen;
+        }
+        return WireVerdict::NoTarget;
     }
     if dp < DP_GOOD {
         return WireVerdict::GndBad; // DP 成功率低 → 共地阻抗高 / 訊號抖
@@ -730,8 +740,9 @@ async fn idle_scan(
         dp = 0;
         ap = 0;
     }
-    // 走線判定：彙整逐線連通 + 邊緣 + 連線品質 → 結論（供 OLED 即時顯示哪條線壞）。
-    TARGET.set_verdict(classify(dio, clk, ce, dp, ap));
+    // 走線判定：彙整逐線連通 + 連線品質 → 結論（供 OLED 即時顯示哪條線壞）。
+    // captured = 本輪是否真的擷取了波形（used!=0）；只有此時 ce 才有意義。
+    TARGET.set_verdict(classify(dio, clk, used != 0, ce, dp, ap));
     dap.set_swclk_khz(saved_khz); // 還原 host 設定
 }
 
