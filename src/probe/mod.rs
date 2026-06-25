@@ -15,8 +15,6 @@
 //! `set_config` 會自動 jmp 到 origin 啟動。寫入路徑結尾改用顯式 `jmp get_next_cmd`
 //! 取代 C 靠 `.wrap_target` 落空的行為，語意等價。
 //!
-//! 部分輔助方法（read_mode/write_mode/deinit 等）供後續 phase 使用，先行宣告。
-#![allow(dead_code)]
 
 use embassy_rp::Peri;
 use embassy_rp::clocks::clk_sys_freq;
@@ -33,7 +31,6 @@ use fixed::types::extra::U8;
 #[derive(Clone, Copy)]
 enum Cmd {
     Write,
-    Skip,
     Turnaround,
     Read,
 }
@@ -41,18 +38,17 @@ enum Cmd {
 /// public label 的絕對位址（origin + 相對偏移）。
 struct CmdAddrs {
     write: u32,
-    get_next: u32,
     turnaround: u32,
     read: u32,
 }
 
 pub struct Probe<'d> {
-    common: Common<'d, PIO0>,
     sm: StateMachine<'d, PIO0, 0>,
     addrs: CmdAddrs,
     sys_hz: u32,
     cached_freq_khz: u32,
     // 保留所有權，避免 PIO pin 還原功能或程式被釋放。
+    _common: Common<'d, PIO0>,
     _swclk: Pin<'d, PIO0>,
     _swdio: Pin<'d, PIO0>,
     _swdi: Option<Pin<'d, PIO0>>,
@@ -117,7 +113,6 @@ impl<'d> Probe<'d> {
         let origin = loaded.origin as u32;
         let d = &prg.public_defines;
         let addrs = CmdAddrs {
-            get_next: origin + d.get_next_cmd as u32,
             write: origin + d.write_cmd as u32,
             turnaround: origin + d.turnaround_cmd as u32,
             read: origin + d.read_cmd as u32,
@@ -161,11 +156,11 @@ impl<'d> Probe<'d> {
         });
 
         Self {
-            common,
             sm,
             addrs,
             sys_hz,
             cached_freq_khz: 1000,
+            _common: common,
             _swclk: swclk,
             _swdio: swdio,
             _swdi: swdi,
@@ -202,7 +197,6 @@ impl<'d> Probe<'d> {
     fn fmt_cmd(&self, bit_count: u32, out_en: bool, cmd: Cmd) -> u32 {
         let addr = match cmd {
             Cmd::Write => self.addrs.write,
-            Cmd::Skip => self.addrs.get_next,
             Cmd::Turnaround => self.addrs.turnaround,
             Cmd::Read => self.addrs.read,
         };
@@ -235,27 +229,6 @@ impl<'d> Probe<'d> {
         }
     }
 
-    /// 等待 SM 把 FIFO 命令消化完並停在 pull（對應 C `probe_wait_idle`）。
-    async fn wait_idle(&mut self) {
-        self.sm.tx().stalled(); // 清除舊的 stall 旗標
-        while !self.sm.tx().stalled() {
-            embassy_futures::yield_now().await;
-        }
-    }
-
-    /// 切換到讀模式（SWDIO 設為輸入）。對應 C `probe_read_mode`。
-    pub async fn read_mode(&mut self) {
-        let cmd = self.fmt_cmd(0, false, Cmd::Skip);
-        self.sm.tx().wait_push(cmd).await;
-        self.wait_idle().await;
-    }
-
-    /// 切換到寫模式（SWDIO 設為輸出）。對應 C `probe_write_mode`。
-    pub async fn write_mode(&mut self) {
-        let cmd = self.fmt_cmd(0, true, Cmd::Skip);
-        self.sm.tx().wait_push(cmd).await;
-        self.wait_idle().await;
-    }
 
     /// 設定/解除 target nRESET（open-drain 模擬）。對應 C `probe_assert_reset`。
     /// `state == false` 代表 assert（驅動為低）；`true` 代表 de-assert（hi-z）。
@@ -314,9 +287,4 @@ impl<'d> Probe<'d> {
         (dio, clk)
     }
 
-    /// 停用 SM（對應 C `probe_deinit` 的主要動作；程式保留載入）。
-    pub fn deinit(&mut self) {
-        self.sm.set_enable(false);
-        self.assert_reset(true);
-    }
 }

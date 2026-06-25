@@ -263,8 +263,6 @@ pub struct Dap<'d> {
     // TransferConfigure
     idle_cycles: u32,
     retry_count: u16,
-    #[allow(dead_code)]
-    match_retry: u16,
     // SWD_Configure
     turnaround: u32, // 1..=4
     data_phase: bool,
@@ -277,7 +275,6 @@ impl<'d> Dap<'d> {
             serial,
             idle_cycles: 0,
             retry_count: 100,
-            match_retry: 0,
             turnaround: 1,
             data_phase: false,
         }
@@ -363,7 +360,7 @@ impl<'d> Dap<'d> {
     fn cmd_transfer_configure(&mut self, req: &[u8], resp: &mut [u8]) -> usize {
         self.idle_cycles = req[1] as u32;
         self.retry_count = u16::from_le_bytes([req[2], req[3]]);
-        self.match_retry = u16::from_le_bytes([req[4], req[5]]);
+        // req[4..6] = match_retry：本韌體不支援 match transfer，忽略不存。
         resp[1] = DAP_OK;
         2
     }
