@@ -22,6 +22,11 @@ pub struct Dap<'d> {
     // SWD_Configure
     turnaround: u32, // 1..=4
     data_phase: bool,
+    // 自主測試學到的「穩定值」(kHz)：AP 也穩的最高 SWCLK；0 = 尚未學到。
+    // host 送 DAP_SWJ_Clock 高於此值時會被夾到此值（韌體負責找可行 clock，見 cmd_swj_clock）。
+    stable_khz: u32,
+    // host 是否下過 DAP_SWJ_Clock。未下過時，host 閒置後預設採 stable_khz（而非開機 ~1MHz）。
+    host_clk_set: bool,
 }
 
 impl<'d> Dap<'d> {
@@ -33,6 +38,8 @@ impl<'d> Dap<'d> {
             retry_count: 100,
             turnaround: 1,
             data_phase: false,
+            stable_khz: 0,
+            host_clk_set: false,
         }
     }
 
@@ -132,7 +139,16 @@ impl<'d> Dap<'d> {
     fn cmd_swj_clock(&mut self, req: &[u8], resp: &mut [u8]) -> usize {
         let hz = u32_le(&req[1..5]);
         let khz = (hz / 1000).max(1);
-        self.probe.set_swclk_freq(khz);
+        self.host_clk_set = true;
+        // clamp：host 要求高於已學到的穩定值就忽略、改採穩定值（韌體負責找可行 clock，
+        // 避免「host 指定一個達不到的速度」害連線失敗）。尚未學到(0)則照 host。
+        // 對協定透明：DAP_SWJ_Clock 只回 OK、不回實際值，且本來整數除頻就讓實際 ≤ 要求。
+        let eff = if self.stable_khz > 0 {
+            khz.min(self.stable_khz)
+        } else {
+            khz
+        };
+        self.probe.set_swclk_freq(eff);
         resp[1] = DAP_OK;
         2
     }
@@ -234,6 +250,19 @@ impl<'d> Dap<'d> {
     /// 目前 SWCLK 頻率（kHz）。
     pub fn swclk_khz(&self) -> u32 {
         self.probe.freq_khz()
+    }
+    /// 自主測試學到「AP 也穩」的最高速率時呼叫，更新穩定值（供 cmd_swj_clock 夾速 + 預設用）。
+    pub fn set_stable_khz(&mut self, khz: u32) {
+        self.stable_khz = khz;
+    }
+    /// 自主掃描收尾還原 SWCLK：host 沒下過 clk 且已有穩定值 → 用穩定值當預設；否則還原 `saved`。
+    pub fn restore_clk(&mut self, saved: u32) {
+        let khz = if !self.host_clk_set && self.stable_khz > 0 {
+            self.stable_khz
+        } else {
+            saved
+        };
+        self.probe.set_swclk_freq(khz);
     }
     /// 逐線連通偵測（轉呼叫 PIO 物理層 `Probe::probe_lines`）。回 (dio_connected, clk_connected)。
     /// 供走線監測判斷哪條線斷：drive 反向→釋放→讀目標內部 pull 翻轉。僅在 host 閒置時呼叫。

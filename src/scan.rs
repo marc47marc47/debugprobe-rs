@@ -7,6 +7,7 @@ use embassy_time::{Duration, Timer};
 /// verdict 遲滯：新結論需連續這麼多輪相同才更新 OLED 顯示（消除臨界線 1Hz 閃爍）。
 const VERDICT_DEBOUNCE: u8 = 3;
 
+
 /// 自主掃描的跨輪持久狀態（取代 idle_scan 原本散裝的 3 個 `&mut` 參數）。
 pub(crate) struct ScanState {
     /// 黏著速率（kHz）：鎖在上次能通的 SWCLK，避免每輪重掃造成顯示亂跳。
@@ -107,6 +108,9 @@ pub(crate) async fn idle_scan(
         dp = q.dp as u32;
         ap = q.ap as u32;
         TARGET.set_link(&q);
+        // 學習穩定值 = 掃到能通(DP)的最高速。改用 DP 而非 AP 門檻：實測這條線 AP 會飄，
+        // 用 AP≥門檻會湊不到、學不到穩定值 → clamp 失效；DP 能通的速度可靠且實測也帶得動 AP。
+        dap.set_stable_khz(used);
     } else {
         // 無目標：不擷取(低速擷取無意義)、推平線、歸零。
         WAVE.push_flat();
@@ -133,6 +137,6 @@ pub(crate) async fn idle_scan(
     if st.streak >= VERDICT_DEBOUNCE {
         TARGET.set_verdict(raw);
     }
-    dap.set_swclk_khz(saved_khz); // 還原 host 設定
+    dap.restore_clk(saved_khz); // 還原：host 沒指定 clk 時改用穩定值當預設（否則還原 host 值）
 }
 
