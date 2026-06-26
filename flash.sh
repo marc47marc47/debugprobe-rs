@@ -14,6 +14,7 @@
 #   test-01-swdio    SWDIO/SWCLK 邊緣計數診斷版（= pico-diag，OLED 第5行 Ce/De）→ 需 BOOTSEL
 #
 # 環境變數:  PROBE_SERIAL=xxxx  覆蓋探針序號（預設見下）
+#            SWD_SPEED=100      覆蓋 SWD 速度(kHz，預設 1000)；長線/接點差連不上時降到 100~200
 #
 # 註:
 #  - 探針(pico/probe/pico2)用 picotool 燒,須先讓該 Pico 進 BOOTSEL
@@ -33,6 +34,10 @@ else
   [ -z "$PROBE" ] && PROBE="2e8a:000c-0:E6604430430F8B21"   # 後備預設
 fi
 
+# SWD 連線速度（kHz）。預設 1000；杜邦線較長/接點較差的目標連不上時調低（如 PROBE 連得到但 download
+# 報「Target device did not respond」就降到 100~200）。實測：某些 F103 線路 1MHz 連不上、100kHz 才穩。
+SWD_SPEED="${SWD_SPEED:-1000}"
+
 # 探針(RP2040)：建置指定 cargo 別名 → 產生 UF2 → picotool 燒。$1=alias $2=uf2檔名
 flash_rp2040() {
   echo ">> cargo $1"
@@ -50,9 +55,9 @@ flash_stm32() {
   echo ">> build $crate"
   ( cd "$crate" && cargo build --release )
   local elf="$crate/target/$triple/release/$crate"
-  echo ">> probe-rs download → $chip (probe $PROBE)"
-  probe-rs download --chip "$chip" --probe "$PROBE" --protocol swd --speed 1000 "$elf"
-  probe-rs reset --chip "$chip" --probe "$PROBE" --protocol swd
+  echo ">> probe-rs download → $chip (probe $PROBE, ${SWD_SPEED}kHz)"
+  probe-rs download --chip "$chip" --probe "$PROBE" --protocol swd --speed "$SWD_SPEED" "$elf"
+  probe-rs reset --chip "$chip" --probe "$PROBE" --protocol swd --speed "$SWD_SPEED"
 }
 
 case "${1:-}" in
