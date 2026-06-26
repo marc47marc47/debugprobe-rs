@@ -11,11 +11,99 @@ impl<'d> Dap<'d> {
         self.probe.write_bits(32, 0xFFFF_FFFF).await; // 共 64 高，足夠
     }
 
-    /// 喚醒單核 DP：JTAG→SWD 切換 + line reset（`swd_wakeup`）+ 讀 DPIDR。讀到回 true。
-    /// 刻意**只用 JTAG-switch**（不送 dormant 序列，避免把單核目標誤推進 dormant 態）。
-    async fn swd_connect(&mut self) -> bool {
-        self.swd_wakeup().await;
-        self.swd_read_dpidr().await
+    /// 讀 DPIDR（DP addr0）的值；重試多次（爛線/長線/接點劣化也撐到底），任一成功即回 Some(值)。
+    pub(crate) async fn read_dpidr_val(&mut self) -> Option<u32> {
+        for _ in 0..12 {
+            let (ack, v) = self.swd_transfer(DP_DPIDR_RD, 0).await;
+            if ack == Ack::Ok {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    /// 送 raw SWJ bit 序列（LSB-first，host 全程驅動），≤64 bit。用於 dormant/line-reset/TARGETSEL
+    /// 等「不看 ACK、不做 turnaround」的原始位元序列（對應 usbipd-rs / CMSIS-DAP 的 DAP_SWJ_Sequence）。
+    async fn swj_bits(&mut self, nbits: u32, value: u64) {
+        if nbits <= 32 {
+            self.probe.write_bits(nbits, value as u32).await;
+        } else {
+            self.probe.write_bits(32, value as u32).await;
+            self.probe.write_bits(nbits - 32, (value >> 32) as u32).await;
+        }
+    }
+
+    /// 送 raw SWJ bit 序列（LSB-first），>64 bit（分 32-bit 連續送出；SWD 為 SWCLK-gated，分段無害）。
+    async fn swj_bits128(&mut self, nbits: u32, mut value: u128) {
+        let mut left = nbits;
+        while left > 0 {
+            let chunk = left.min(32);
+            self.probe.write_bits(chunk, value as u32).await;
+            value >>= 32;
+            left -= chunk;
+        }
+    }
+
+    /// dormant → SWD 喚醒（ADIv5.2，對齊 usbipd-rs / probe-rs RP2040 路徑）：line reset →
+    /// JTAG-to-dormant(0x33BBBBBA) → ≥8 高 → 128-bit selection alert → 4 低 + 8-bit 啟用碼 0x1A。
+    /// 全為 raw SWJ 序列。multidrop DP 開機在 dormant，只認此序列（JTAG→SWD 切換 0xE79E 對它無效）；
+    /// 對 STM32（DPv1/DPv2）為良性。
+    async fn swd_dormant_to_swd(&mut self) {
+        self.swj_bits(54, 0x0007_FFFF_FFFF_FFFF).await; // line reset：51 高 + 3 idle
+        self.swj_bits(31, 0x33BB_BBBA).await; // JTAG-to-dormant
+        self.swj_bits(8, 0xFF).await; // ≥8 cycles high
+        self.swj_bits(64, 0x8685_2D95_6209_F392).await; // selection alert [0:63]
+        self.swj_bits(64, 0x19BC_0EA2_E3DD_AFE9).await; // selection alert [64:127]
+        self.swj_bits(12, 0x1A0).await; // 4 低 + 8-bit 啟用碼 0x1A
+    }
+
+    /// line reset（51 高 + 3 idle）緊接 TARGETSEL 封包，當**一條連續 raw 序列**送出（TARGETSEL 必須是
+    /// line reset 後第一個封包，中間不可有空隙）。低 13 bit 的 0x1f99 ＝ request(0x99) + 5 個 1
+    /// （Trn/ACK/Trn 全 host 驅動、不 Hi-Z、不看 ACK）；接 32-bit TARGETSEL 值 + 1-bit parity。
+    async fn line_reset_then_targetsel(&mut self, targetsel: u32) {
+        let parity = (targetsel.count_ones() % 2) as u128;
+        let ts = (parity << 45) | ((targetsel as u128) << 13) | 0x1f99;
+        let line_reset: u128 = 0x0007_FFFF_FFFF_FFFF; // 51 個 1（54-bit 欄位）
+        let combined = (ts << 54) | line_reset; // 54-bit reset，接 48-bit TARGETSEL
+        self.swj_bits128(102, combined).await;
+    }
+
+    /// 試著用 multidrop 選 RP2040 core0 並確認 DPIDR == 0x0BC12477。供 adaptive_sweep 在 single-drop
+    /// 讀不到時偵測 RP2040；成功回 true。**只在 single-drop 失敗後才呼叫** → STM32 present 時不會送
+    /// TARGETSEL（其 single-drop 必成功）；DPv1（F103）無 multidrop、stray TARGETSEL 無害；
+    /// DPv2 若被誤選，下輪 swd_wakeup 的 line reset 會重新選回。
+    pub(crate) async fn try_rp2040_select(&mut self) -> bool {
+        self.swd_dormant_to_swd().await; // multidrop DP 開機在 dormant，須此序列喚醒
+        self.line_reset_then_targetsel(reg::RP2040_TS_CORE0).await; // 連續 line reset + TARGETSEL
+        for _ in 0..8 {
+            let (ack, v) = self.swd_transfer(DP_DPIDR_RD, 0).await;
+            if ack == Ack::Ok && v == reg::RP2040_DPIDR {
+                let _ = self.swd_transfer(DP_ABORT_WR, reg::DP_ABORT_CLEAR).await; // 清 reset 後 sticky
+                return true;
+            }
+        }
+        false
+    }
+
+    /// RP2040 multidrop 偵測：TARGETSEL(core0) → 確認 DPIDR → powerup → 讀 CPUID。
+    /// 由 detect_target 在 `self.rp2040`（adaptive_sweep 已學到）時呼叫。
+    async fn detect_rp2040(&mut self) -> Option<TargetInfo> {
+        if !self.try_rp2040_select().await {
+            return None;
+        }
+        // powerup 後讀 CPUID 取核心（Cortex-M0+ = 0xC60）；powerup 失敗仍回報為 RP2040。
+        let core = if self.debug_powerup().await {
+            self.read_cpuid_part().await
+        } else {
+            0
+        };
+        Some(TargetInfo {
+            designer: JEP_RASPI,
+            devid: reg::RP2040_DEVID_MARK, // → CHIP_NAMES 顯示 "RP2040"
+            part: 0,
+            rdp: RdpLevel::Unknown,
+            core,
+        })
     }
 
     /// debug powerup：清 sticky → SELECT=0 → CTRL/STAT PWRUPREQ → 輪詢 powerup ACK。成功回 true。
@@ -87,10 +175,14 @@ impl<'d> Dap<'d> {
     /// 自包含（含 line reset + JTAG→SWD 切換 + debug powerup + ACK 輪詢）；無目標/失敗回 None。
     /// 注意：會做 SWD line reset，故僅應在 host **未在使用 DAP** 時呼叫。
     pub async fn detect_target(&mut self) -> Option<TargetInfo> {
-        // 喚醒：JTAG→SWD 切換 + 讀 DPIDR（single-drop）。不做 multidrop（避免 TARGETSEL 誤刪 DPv2 STM32）。
-        if !self.swd_connect().await {
-            return None;
+        // 喚醒 + 讀 DPIDR。RP2040 是 multidrop SW-DP（DPIDR=0x0BC12477）→ 走 multidrop 偵測（TARGETSEL
+        // 選 core0）；其餘（STM32 DPv1/DPv2）維持 single-drop（不送 TARGETSEL，免誤刪 DPv2）。
+        self.swd_wakeup().await;
+        // RP2040（multidrop）：adaptive_sweep 已學到旗標 → 走 multidrop 偵測；否則 single-drop（STM32）。
+        if self.rp2040 {
+            return self.detect_rp2040().await;
         }
+        self.read_dpidr_val().await?; // 無 DPIDR 回應 → 無目標
         if !self.debug_powerup().await {
             return None;
         }
@@ -145,6 +237,15 @@ impl<'d> Dap<'d> {
     pub async fn link_quality(&mut self) -> LinkQuality {
         self.swd_wakeup().await;
 
+        // RP2040 是 multidrop（adaptive_sweep 已學到旗標）：line reset + TARGETSEL 選 core0；
+        // 否則維持 single-drop（STM32）。AP 讀址：RP2040 無 DBGMCU → 改讀 CPUID；STM32 讀 DBGMCU。
+        let rp2040 = self.rp2040;
+        if rp2040 {
+            self.swd_dormant_to_swd().await; // multidrop：dormant→SWD 喚醒
+            self.line_reset_then_targetsel(reg::RP2040_TS_CORE0).await; // 連續 line reset + TARGETSEL 選 core0
+        }
+        let ap_addr = if rp2040 { reg::CPUID } else { reg::DBGMCU_IDCODE };
+
         // DP：連讀 16× DPIDR，與第一筆一致（且非全 0/全 1）才算成功。
         let mut dp_ok = 0u8;
         let mut dp_ref = 0u32;
@@ -170,12 +271,12 @@ impl<'d> Dap<'d> {
             return LinkQuality { dp: dp_ok, ap: 0 };
         }
 
-        // AP：連讀 16× DBGMCU_IDCODE，非 0 且一致才算成功。
+        // AP：連讀 16× ap_addr（STM32=DBGMCU、RP2040=CPUID），非 0 且一致才算成功。
         let mut ap_ok = 0u8;
         let mut ap_ref = 0u32;
         let mut have_ap = false;
         for _ in 0..16 {
-            let Some(v) = self.read_mem32(reg::DBGMCU_IDCODE).await else {
+            let Some(v) = self.read_mem32(ap_addr).await else {
                 continue;
             };
             if v == 0 {
@@ -245,12 +346,6 @@ impl<'d> Dap<'d> {
     /// 讀 DPIDR（DP addr0）；**重試多次**,任一成功即回 true（兼作在不在偵測 + 邏輯擷取訊號刺激）。
     /// 重試讓較差的線（4 線/長線/接點劣化）也能讀到,而非單次失敗就判無目標。
     pub async fn swd_read_dpidr(&mut self) -> bool {
-        for _ in 0..12 {
-            // D：重試加倍（爛線/長線/接點劣化也撐到底）。
-            if self.swd_transfer(DP_DPIDR_RD, 0).await.0 == Ack::Ok {
-                return true;
-            }
-        }
-        false
+        self.read_dpidr_val().await.is_some()
     }
 }

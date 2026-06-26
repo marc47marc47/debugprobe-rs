@@ -27,6 +27,9 @@ pub struct Dap<'d> {
     stable_khz: u32,
     // host 是否下過 DAP_SWJ_Clock。未下過時，host 閒置後預設採 stable_khz（而非開機 ~1MHz）。
     host_clk_set: bool,
+    // 自主偵測學到的「目標是 RP2040（multidrop SW-DP）」旗標：由 adaptive_sweep 設定，
+    // detect_target/link_quality 依此決定走 multidrop（送 TARGETSEL 選 core0）或 single-drop（STM32）。
+    pub(crate) rp2040: bool,
 }
 
 impl<'d> Dap<'d> {
@@ -40,6 +43,7 @@ impl<'d> Dap<'d> {
             data_phase: false,
             stable_khz: 0,
             host_clk_set: false,
+            rp2040: false,
         }
     }
 

@@ -3,6 +3,8 @@ use crate::dap;
 
 /// 查表式（`(dev_id, name)`）；涵蓋市面常見系列；GD32F1 與 STM32F1 共用 DEV_ID 故並列標示。
 pub(crate) static CHIP_NAMES: &[(u16, &str)] = &[
+    // Raspberry Pi RP2040（multidrop SW-DP；借 JEDEC 廠商碼 0x927 當顯示鍵）
+    (0x927, "RP2040"),
     // F0
     (0x440, "STM32F030/05x"), (0x444, "STM32F03x"), (0x442, "STM32F09x"),
     (0x445, "STM32F04x"), (0x448, "STM32F07x"),

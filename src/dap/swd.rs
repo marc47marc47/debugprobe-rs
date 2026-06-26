@@ -229,7 +229,7 @@ impl<'d> Dap<'d> {
         (ack, 0)
     }
 
-    async fn idle(&mut self) {
+    pub(crate) async fn idle(&mut self) {
         // 最少 8 個 idle clock：host(OpenOCD/probe-rs)常把 idle_cycles 設 0、密集連發 AP 交易，
         // 長線在「讀資料 Hi-Z → 下一筆驅動」之間來不及 settle → AP 間歇失敗（DP 單筆卻沒事）。
         // 強制留 settle 時間，把邊際的密集 AP 序列拉穩。usbipd-rs 因單筆有間隔故原本就穩。

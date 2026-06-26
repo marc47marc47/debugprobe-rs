@@ -271,4 +271,10 @@ pub(crate) mod reg {
     pub const CTRLSTAT_PWRUPACK: u32 = 0xA000_0000;
     /// DP ABORT：清 sticky error（STKCMP/STKERR/WDERR/ORUNERR）。
     pub const DP_ABORT_CLEAR: u32 = 0x1E;
+    /// RP2040 multidrop SW-DP IDCODE（DPIDR）：辨識「這是 multidrop 目標」。
+    pub const RP2040_DPIDR: u32 = 0x0BC1_2477;
+    /// RP2040 TARGETSEL：選 core0（core1=0x1100_2927、rescue=0xF100_2927）。
+    pub const RP2040_TS_CORE0: u32 = 0x0100_2927;
+    /// 顯示標記：借 RP2040 的 JEDEC 廠商碼 0x927 當「devid」→ CHIP_NAMES 顯示 "RP2040"。
+    pub const RP2040_DEVID_MARK: u16 = 0x927;
 }

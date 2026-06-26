@@ -48,8 +48,15 @@ pub(crate) async fn dap_task(
     loop {
         // wait_enabled 為 level 觸發（已啟用即立即返回）。
         // 無 USB host → 每 FAST 即 idle（即時波形）；有 host → 進指令迴圈，僅 host 閒置 SLOW 才 idle。
+        // host_present：本輪 USB 是否已列舉（wiring-monitor 用：掃描時仍要對 host 指令保持回應）。
+        #[cfg(feature = "wiring-monitor")]
+        let mut host_present = false;
         let idle = match select(transport.read_ep.wait_enabled(), Timer::after(FAST)).await {
             Either::First(()) => {
+                #[cfg(feature = "wiring-monitor")]
+                {
+                    host_present = true;
+                }
                 match select3(
                     transport.read_ep.read(&mut bulk_req),
                     transport.hid_reader.read(&mut hid_req),
@@ -108,6 +115,32 @@ pub(crate) async fn dap_task(
             #[cfg(not(feature = "wiring-monitor"))]
             let proceed = true;
             if proceed {
+                // wiring-monitor + host 在線：掃描與「讀下一個 host 指令」競賽 —— 指令先到就**中止本輪
+                // 掃描**立即服務，避免 usbipd/probe-rs 的 IN transfer 卡在長掃描後面被取消（RP2040
+                // multidrop 掃描更長，尤需如此）。host 不在線（或 force-detect）則照常整輪掃描。
+                #[cfg(feature = "wiring-monitor")]
+                if host_present {
+                    match select(
+                        idle_scan(&mut dap, &mut cap, &mut scan_st),
+                        transport.read_ep.read(&mut bulk_req),
+                    )
+                    .await
+                    {
+                        Either::First(()) => {}
+                        Either::Second(Ok(n)) if n > 0 => {
+                            record_evt(bulk_req[0]);
+                            last_host = Some(Instant::now());
+                            let len = dap.execute_command(&bulk_req[..n], &mut resp).await;
+                            if len > 0 {
+                                let _ = transport.write_ep.write(&resp[..len]).await;
+                            }
+                        }
+                        _ => {}
+                    }
+                } else {
+                    idle_scan(&mut dap, &mut cap, &mut scan_st).await;
+                }
+                #[cfg(not(feature = "wiring-monitor"))]
                 idle_scan(&mut dap, &mut cap, &mut scan_st).await;
             }
         }
@@ -170,7 +203,12 @@ pub(crate) async fn oled_task(mut dbg: display::DebugOled, mut led: Output<'stat
         let mut l_flash: heapless::String<21> = heapless::String::new();
         if show_chip && valid {
             // 短標 + 頻率，控制在 x<82 不撞右側柱狀圖（如 "RDP0 1000k"）。
-            let _ = write!(l_flash, "{} {}k", TARGET.rdp().short(), TARGET.used_khz());
+            // RP2040 無 RDP 概念 → 改標雙核 Cortex-M0+。
+            if TARGET.devid() == dap::reg::RP2040_DEVID_MARK {
+                let _ = write!(l_flash, "2xM0+ {}k", TARGET.used_khz());
+            } else {
+                let _ = write!(l_flash, "{} {}k", TARGET.rdp().short(), TARGET.used_khz());
+            }
         } else if show_chip {
             let _ = write!(l_flash, "probe {}k", TARGET.probe_khz());
         } else {

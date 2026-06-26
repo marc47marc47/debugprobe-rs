@@ -95,11 +95,24 @@ pub(crate) async fn adaptive_sweep(dap: &mut dap::Dap<'static>, st: &mut ScanSta
         TARGET.set_probe_khz(st.cur);
         dap.set_swclk_khz(st.cur);
         dap.swd_wakeup().await;
-        if dap.swd_read_dpidr().await {
-            return st.cur;
+        match dap.read_dpidr_val().await {
+            // single-drop 讀到 DPIDR：值是 RP2040 的就設旗標(走 multidrop)，否則 STM32(single-drop)。
+            Some(v) => {
+                dap.rp2040 = v == dap::reg::RP2040_DPIDR;
+                return st.cur;
+            }
+            // single-drop 讀不到：可能是 RP2040（multidrop 需 TARGETSEL）→ 試選 core0。
+            // 只在 single-drop 失敗後才送 TARGETSEL → STM32 present(single-drop 必成功)不受影響。
+            None => {
+                if dap.try_rp2040_select().await {
+                    dap.rp2040 = true;
+                    return st.cur;
+                }
+            }
         }
         let lower = step_down(st.cur);
         if lower == st.cur {
+            dap.rp2040 = false;
             return 0; // 已到最低速仍不通 → 視為無目標
         }
         st.ceiling = st.cur; // 此速及以上 DP 不通 → 釘上限，別再往上爬
