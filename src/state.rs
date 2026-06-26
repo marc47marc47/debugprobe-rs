@@ -33,8 +33,10 @@ pub(crate) struct TargetShared {
     part: AtomicU32,
     /// CPUID PARTNO（Cortex-M 核心型號）；0=未知。
     core: AtomicU32,
-    /// 自適應偵測實際採用的 SWCLK（kHz）；0 = 沒讀到。
+    /// 自適應偵測實際採用的 SWCLK（kHz，本輪操作/測試clk）；0 = 沒讀到。
     used_khz: AtomicU32,
+    /// 已確認 AP 穩的 SWCLK（kHz，穩定clk）：上升式選速退階後釘住的可靠速率。
+    stable_khz: AtomicU32,
     /// 連線品質訊號儀：每輪 16 次讀取成功數（DP 短交易 / AP AHB 長交易）。
     link_dp: AtomicU32,
     link_ap: AtomicU32,
@@ -60,6 +62,7 @@ impl TargetShared {
             part: AtomicU32::new(0),
             core: AtomicU32::new(0),
             used_khz: AtomicU32::new(0),
+            stable_khz: AtomicU32::new(0),
             link_dp: AtomicU32::new(0),
             link_ap: AtomicU32::new(0),
             probe_khz: AtomicU32::new(0),
@@ -144,6 +147,12 @@ impl TargetShared {
     }
     pub(crate) fn used_khz(&self) -> u32 {
         self.used_khz.load(Ordering::Relaxed)
+    }
+    pub(crate) fn set_stable_khz(&self, khz: u32) {
+        self.stable_khz.store(khz, Ordering::Relaxed);
+    }
+    pub(crate) fn stable_khz(&self) -> u32 {
+        self.stable_khz.load(Ordering::Relaxed)
     }
     pub(crate) fn set_link(&self, q: &dap::LinkQuality) {
         self.link_dp.store(q.dp as u32, Ordering::Relaxed);

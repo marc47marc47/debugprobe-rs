@@ -287,7 +287,7 @@ checksum = "f578e8e2c440e7297e008bb5486a3a8a194775224bbc23729b0dbdfaeebf162e"
 
 [[package]]
 name = "debugprobe-rs"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "cortex-m",
  "cortex-m-rt",

@@ -117,6 +117,10 @@ pub(crate) async fn dap_task(
 /// OLED 顯示，跑在 **core1**：上 3 行文字（版本/晶片/可燒狀態）+ 下半 SWD 訊號品質即時波形。
 #[embassy_executor::task]
 pub(crate) async fn oled_task(mut dbg: display::DebugOled, mut led: Output<'static>) {
+    // 第 5 行：偵測到新鬆動後只顯示 flap 約 3 秒(FLAP_HOLD×250ms)，之後回到 S/T 時脈（計數照常累加）。
+    const FLAP_HOLD: u8 = 12;
+    let mut prev_flaps = (0u32, 0u32);
+    let mut flap_hold: u8 = 0;
     loop {
         led.toggle();
         let valid = TARGET.valid();
@@ -180,13 +184,19 @@ pub(crate) async fn oled_task(mut dbg: display::DebugOled, mut led: Output<'stat
         let clk = WAVE.load_clk();
         let dio = WAVE.load_dio();
         let pos = WAVE.pos();
-        // 左下角文字：鬆動統計（反覆拔插時哪條線最會鬆）；尚無翻轉則顯示取樣率。
+        // 第 5 行：剛偵測到新鬆動 → 顯示 flpC/D 約 3 秒（拔插測試用）；否則顯示「穩定clk + 測試clk」。
+        // S = 已確認 AP 穩的速率(clamp/操作基準)；T = 本輪正在用/往上試的速率。
         let mut l_scale: heapless::String<21> = heapless::String::new();
         let (cf, df) = TARGET.flaps();
-        if cf != 0 || df != 0 {
+        if cf + df > prev_flaps.0 + prev_flaps.1 {
+            flap_hold = FLAP_HOLD; // 有新鬆動 → 顯示幾秒
+        }
+        prev_flaps = (cf, df);
+        if flap_hold > 0 {
+            flap_hold -= 1;
             let _ = write!(l_scale, "flpC{} D{}", cf, df);
         } else {
-            let _ = write!(l_scale, "{}ns/col", logic::sample_ns());
+            let _ = write!(l_scale, "S{}k T{}k", TARGET.stable_khz(), TARGET.used_khz());
         }
         // 右側 4 條柱狀圖：逐線連通 C/D（probe_lines，0/1）+ 連線品質 DP/AP（0..16）。
         // 只用可信指標：Ce/De/hC/hD 來自對不準的擷取窗、會誤導，已不顯示。

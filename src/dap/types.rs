@@ -225,12 +225,6 @@ pub(crate) enum RdpReg {
     Unknown,
 }
 
-/// 此 DEV_ID 家族是否有可解讀的 RDP 暫存器（供「鎖了但 RDP? 要不要再驗」判斷：
-/// 不支援的家族 RDP 本就 Unknown，不該無限再驗）。
-pub(crate) fn rdp_supported(devid: u16) -> bool {
-    !matches!(rdp_reg(devid), RdpReg::Unknown)
-}
-
 /// 依 DBGMCU DEV_ID 判斷 RDP 暫存器家族。
 pub(crate) fn rdp_reg(devid: u16) -> RdpReg {
     match devid {

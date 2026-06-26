@@ -1,6 +1,6 @@
 [package]
 name = "debugprobe-rs"
-version = "0.4.3"
+version = "0.4.4"
 edition = "2024"
 description = "Raspberry Pi Debug Probe firmware, rewritten in Rust on Embassy (RP2040 / RP2350)"
 license = "MIT"
