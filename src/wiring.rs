@@ -1,7 +1,7 @@
 //! 走線健康判定（WireVerdict + classify + 門檻）。自 main.rs 抽出（Phase 13 R4）。
 
 /// `Unknown` 為初值（尚未掃過，例如 host 在線且預設 build 不監測）→ OLED 沿用既有顯示。
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WireVerdict {
     Unknown,      // 0：尚未判定
     Ok,           // 1：兩線連通、DP/AP 近滿

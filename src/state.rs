@@ -1,6 +1,6 @@
 //! 跨 task 共享狀態（TargetShared/WaveRing/事件環/UART 計數）。自 main.rs 抽出（R4）。
 use crate::dap;
-use crate::logic::{self, SignalStats};
+use crate::logic;
 use crate::wiring::WireVerdict;
 use portable_atomic::{AtomicU8, AtomicU32, Ordering};
 
@@ -40,13 +40,6 @@ pub(crate) struct TargetShared {
     link_ap: AtomicU32,
     /// 目前正在嘗試的偵測 SWCLK（kHz）：掃頻每步更新。OLED 無目標時顯示，反映掃到哪個頻率。
     probe_khz: AtomicU32,
-    /// 上一窗擷取的 SWCLK / SWDIO 邊緣(跳變)數。SWCLK 由探針自驅 → CLK e=0 即探針輸出死。
-    clk_edges: AtomicU32,
-    dio_edges: AtomicU32,
-    /// SM1 取樣:該窗 SWCLK / SWDIO 為高的取樣數(0..SAMPLES)。反映電位/duty:
-    /// 邊緣=0 且 高=滿 → 卡高;邊緣=0 且 高=0 → 卡低;邊緣多且 高≈半 → 正常 toggle。
-    clk_hi: AtomicU32,
-    dio_hi: AtomicU32,
     /// 走線監測：逐線連通（probe_lines 結果，0/1）。
     dio_conn: AtomicU8,
     clk_conn: AtomicU8,
@@ -70,10 +63,6 @@ impl TargetShared {
             link_dp: AtomicU32::new(0),
             link_ap: AtomicU32::new(0),
             probe_khz: AtomicU32::new(0),
-            clk_edges: AtomicU32::new(0),
-            dio_edges: AtomicU32::new(0),
-            clk_hi: AtomicU32::new(0),
-            dio_hi: AtomicU32::new(0),
             dio_conn: AtomicU8::new(0),
             clk_conn: AtomicU8::new(0),
             verdict: AtomicU8::new(0),
@@ -117,21 +106,6 @@ impl TargetShared {
     }
     pub(crate) fn probe_khz(&self) -> u32 {
         self.probe_khz.load(Ordering::Relaxed)
-    }
-    /// 記錄上一窗 SWCLK/SWDIO 的邊緣數與高電位取樣數。
-    pub(crate) fn set_signal(&self, s: SignalStats) {
-        self.clk_edges.store(s.clk_edges, Ordering::Relaxed);
-        self.dio_edges.store(s.dio_edges, Ordering::Relaxed);
-        self.clk_hi.store(s.clk_hi, Ordering::Relaxed);
-        self.dio_hi.store(s.dio_hi, Ordering::Relaxed);
-    }
-    pub(crate) fn signal(&self) -> SignalStats {
-        SignalStats {
-            clk_edges: self.clk_edges.load(Ordering::Relaxed),
-            dio_edges: self.dio_edges.load(Ordering::Relaxed),
-            clk_hi: self.clk_hi.load(Ordering::Relaxed),
-            dio_hi: self.dio_hi.load(Ordering::Relaxed),
-        }
     }
     /// 寫入偵測結果（designer/part/flash 先寫，devid 含有效旗標最後寫）。
     pub(crate) fn store(&self, info: &dap::TargetInfo) {

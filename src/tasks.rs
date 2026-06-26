@@ -188,18 +188,13 @@ pub(crate) async fn oled_task(mut dbg: display::DebugOled, mut led: Output<'stat
         } else {
             let _ = write!(l_scale, "{}ns/col", logic::sample_ns());
         }
-        // 右側 6 條柱狀圖（含 line1/line2 右側）：訊號層 Ce/De/hC/hD + 連線層 DP/AP。
-        // Ce0 hC0=SWCLK卡低、Ce0 hC100=卡高、Ce 有長 hC≈50=正常 toggle；DP/AP 往滿=連線品質好。
-        let sig = TARGET.signal();
-        let (ce, de, ch, dh) = (sig.clk_edges, sig.dio_edges, sig.clk_hi, sig.dio_hi);
+        // 右側 4 條柱狀圖：逐線連通 C/D（probe_lines，0/1）+ 連線品質 DP/AP（0..16）。
+        // 只用可信指標：Ce/De/hC/hD 來自對不準的擷取窗、會誤導，已不顯示。
         let q = TARGET.link();
         let (dp, ap) = (q.dp as u32, q.ap as u32);
-        let s = logic::SAMPLES as u32;
         let bars = [
-            display::Bar { label: "Ce", value: ce, max: 64 },
-            display::Bar { label: "De", value: de, max: 64 },
-            display::Bar { label: "hC", value: ch * 100 / s, max: 100 },
-            display::Bar { label: "hD", value: dh * 100 / s, max: 100 },
+            display::Bar { label: "C", value: lines.clk as u32, max: 1 },
+            display::Bar { label: "D", value: lines.dio as u32, max: 1 },
             display::Bar { label: "DP", value: dp, max: 16 },
             display::Bar { label: "AP", value: ap, max: 16 },
         ];
