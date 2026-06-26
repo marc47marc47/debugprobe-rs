@@ -62,6 +62,21 @@ flash_stm32() {
   probe-rs reset --chip "$chip" --probe "$PROBE" --protocol swd --speed "$SWD_SPEED"
 }
 
+# layer-2 Pico/RP2040 目標：build src/bin/<bin> → 經探針(layer 1) probe-rs SWD 燒錄 + 重置（--chip RP2040）。
+# $1=bin 名稱（picotarget / uartecho / uarthello / uartmon）
+flash_rp2040_target() {
+  local bin="$1"
+  echo ">> build $bin (rp2040 目標 bin)"
+  cargo build --release --no-default-features --features rp2040 --bin "$bin"
+  local elf="target/thumbv6m-none-eabi/release/$bin"
+  # CONNECT_RESET=1 → 加 --connect-under-reset：拉住目標 RUN 復位再連線，
+  # 讓「正在跑韌體」的 RP2040 不必 BOOTSEL 也能燒（需接 探針 GP1 → 目標 RUN/pin30）。
+  local cur="${CONNECT_RESET:+--connect-under-reset}"
+  echo ">> probe-rs download → RP2040 (probe $PROBE, ${SWD_SPEED}kHz${CONNECT_RESET:+, connect-under-reset})"
+  probe-rs download --chip RP2040 --probe "$PROBE" --protocol swd --speed "$SWD_SPEED" $cur "$elf"
+  probe-rs reset --chip RP2040 --probe "$PROBE" --protocol swd --speed "$SWD_SPEED"
+}
+
 case "${1:-}" in
   # 預設(pico)= 走線監測版(wiring-monitor)：插著 PC 也持續監測走線/晶片，OLED 顯示
   # verdict + C/D/DP/AP；有 host 活動退避(GUARD)故配 probe-rs/OpenOCD 較安全。
@@ -89,6 +104,10 @@ case "${1:-}" in
   f401)            flash_stm32 stm32f401-target STM32F401CCUx ;;
   f446)            flash_stm32 stm32f446-target STM32F446RETx ;;
   f103)            flash_stm32 stm32f103-target STM32F103C8Tx thumbv7m-none-eabi ;;
+  # layer-2 Pico(RP2040) 目標：經探針 SWD 把測試韌體燒到另一顆 Pico（不需 BOOTSEL；目標要供電+接好線）。
+  # picotarget = 對等 f401-target（LED+OLED+UART RX echo+1s TX 心跳）。
+  picotarget | pico-target)  flash_rp2040_target picotarget ;;
+  uartecho | uarthello | uartmon)  flash_rp2040_target "$1" ;;
   # 走線監測診斷版（= pico-monitor，已取代舊 pico-diag）：插 PC 也自主監測，
   # OLED 顯示走線 verdict + C/D/DP/AP 柱。需 BOOTSEL。
   test-01-swdio)   flash_rp2040 build-pico-monitor test-01-swdio.uf2 ;;
@@ -111,6 +130,8 @@ case "${1:-}" in
     echo "  pico-diag    【已被 pico-monitor 取代】自動改燒 monitor — 需 BOOTSEL"
     echo "  f401/f446    layer-2 STM32 目標（Cortex-M4，經探針 SWD 燒錄）"
     echo "  f103         layer-2 STM32 目標（Blue Pill, Cortex-M3，經探針 SWD 燒錄）"
+    echo "  picotarget   layer-2 Pico(RP2040) 目標（LED+OLED+UART，對等 f401-target，經探針 SWD 燒錄）"
+    echo "  uartecho/uarthello/uartmon  layer-2 Pico 目標單項測試韌體（經探針 SWD 燒錄）"
     echo "  env: SWD_SPEED=100 降速（長線連不上時）；PROBE_SERIAL=xxxx 指定探針"
     echo "  test-01-swdio SWDIO/SWCLK 邊緣計數診斷版（OLED 第5行 Ce/De）— 需 BOOTSEL"
     echo "  path/to/x.uf2 直接燒現成 .uf2 檔（不重建）— 需 BOOTSEL"

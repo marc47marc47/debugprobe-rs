@@ -90,70 +90,130 @@ const PIN = [null,
 const C = {swd:"#e74c3c",uart:"#3498db",i2c:"#2ecc71",pwr:"#e67e22",
            gnd:"#34495e",usb:"#9b59b6",led:"#f1c40f"};
 
-// 各板使用的腳位：pin -> {c:顏色, t:標註}
+// 各板使用的腳位（畫彩色點）：pin -> {c:顏色}
 const A_USED = {
-  2:{c:C.swd, t:"nRESET(opt) → B.RUN"},
-  4:{c:C.swd, t:"SWCLK → B SWCLK"},
-  5:{c:C.swd, t:"SWDIO → B SWDIO"},
-  6:{c:C.uart,t:"UART1 TX → B pin2 (GP1/RX)"},
-  7:{c:C.uart,t:"UART1 RX ← B pin1 (GP0/TX)"},
-  9:{c:C.i2c, t:"I²C1 SDA → OLED-A SDA"},
-  10:{c:C.i2c,t:"I²C1 SCL → OLED-A SCL"},
-  36:{c:C.pwr,t:"3V3 → OLED-A VCC"},
-  38:{c:C.gnd,t:"GND → OLED-A / B GND"},
+  2:{c:C.swd}, 3:{c:C.gnd}, 4:{c:C.swd}, 5:{c:C.swd},
+  6:{c:C.uart}, 7:{c:C.uart}, 9:{c:C.i2c}, 10:{c:C.i2c}, 36:{c:C.pwr}, 38:{c:C.gnd},
 };
 const B_USED = {
-  1:{c:C.uart,t:"UART0 TX → A pin7 (GP5)"},
-  2:{c:C.uart,t:"UART0 RX ← A pin6 (GP4)"},
-  9:{c:C.i2c, t:"I²C1 SDA → OLED-B SDA"},
-  10:{c:C.i2c,t:"I²C1 SCL → OLED-B SCL"},
-  30:{c:C.swd,t:"RUN ← A.GP1 (nRESET, opt)"},
-  36:{c:C.pwr,t:"3V3 → OLED-B VCC"},
-  38:{c:C.gnd,t:"GND → OLED-B / A GND"},
+  1:{c:C.uart}, 2:{c:C.uart}, 9:{c:C.i2c}, 10:{c:C.i2c}, 30:{c:C.swd}, 36:{c:C.pwr}, 38:{c:C.gnd},
 };
 
-function board(title, subtitle, used, hasUsbHost){
-  const W=300, padTop=70, rowH=26, leftX=70, rightX=W-70, r=8;
-  const H = padTop + rowH*20 + 60;
-  const svg = [];
-  svg.push(`<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" font-family="monospace">`);
-  // 板身
-  svg.push(`<rect x="40" y="50" width="${W-80}" height="${rowH*20+20}" rx="14" fill="#0a7d4f"/>`);
-  // USB
-  svg.push(`<rect x="${W/2-26}" y="40" width="52" height="20" rx="4" fill="#bbb" stroke="#888"/>`);
-  svg.push(`<text x="${W/2}" y="54" text-anchor="middle" font-size="10" fill="#333">USB${hasUsbHost?'→PC':''}</text>`);
-  // 標題
-  svg.push(`<text x="${W/2}" y="22" text-anchor="middle" font-size="15" font-weight="bold">${title}</text>`);
-  svg.push(`<text x="${W/2}" y="${H-8}" text-anchor="middle" font-size="11" fill="#0a7d4f">${subtitle}</text>`);
-  // 腳位：左 1..20（上→下），右 40..21（上→下）
-  for(let i=0;i<20;i++){
-    drawPin(svg, i+1, leftX, padTop+i*rowH+10, r, used, "L");        // 左
-    drawPin(svg, 40-i, rightX, padTop+i*rowH+10, r, used, "R");      // 右
-  }
-  svg.push(`</svg>`);
-  return svg.join("");
+// ---- 版面 ----
+const BWrect=190, rowH=24, BY=120, pinR=7;
+const xoA=120, xoB=700;                 // 兩板 rect 左緣 x
+const MIR_A=true, MIR_B=false;          // 探針 A 鏡像 → I/O 腳朝中間，連線清楚
+
+function pinPos(xo, mir, pin){
+  const lh = pin<=20; const i = lh? pin-1 : 40-pin;
+  let physLeft = lh; if(mir) physLeft=!physLeft;
+  const x = physLeft? xo+14 : xo+BWrect-14;
+  const y = BY+16+i*rowH;
+  return {x,y,left:physLeft};
 }
-function drawPin(svg, pin, x, y, r, used, side){
-  const u = used[pin];
-  const fill = u? u.c : (PIN[pin]==="GND"?"#888":"#ddd");
-  const stroke = u? "#000":"#999";
-  svg.push(`<circle cx="${x}" cy="${y}" r="${r}" fill="${fill}" stroke="${stroke}" stroke-width="${u?2:1}"/>`);
-  svg.push(`<text x="${x}" y="${y+3}" text-anchor="middle" font-size="8" fill="${u?'#fff':'#555'}">${pin}</text>`);
-  // pin 名稱（板內側）
-  const nx = side==="L"? x+14 : x-14;
-  const anchor = side==="L"? "start":"end";
-  svg.push(`<text x="${nx}" y="${y+3}" text-anchor="${anchor}" font-size="9" fill="#fff">${PIN[pin]}</text>`);
-  // 使用標註（板外側）
-  if(u){
-    const tx = side==="L"? x-14 : x+14;
-    const a = side==="L"? "end":"start";
-    svg.push(`<text x="${tx}" y="${y+3}" text-anchor="${a}" font-size="9" fill="${u.c}" font-weight="bold">●</text>`);
+
+function drawBoard(svg, xo, mir, title, sub, used, usbHost){
+  const bh = rowH*20+12;
+  svg.push(`<rect x="${xo}" y="${BY}" width="${BWrect}" height="${bh}" rx="12" fill="#0a7d4f"/>`);
+  svg.push(`<rect x="${xo+BWrect/2-22}" y="${BY-14}" width="44" height="18" rx="3" fill="#bbb" stroke="#888"/>`);
+  svg.push(`<text x="${xo+BWrect/2}" y="${BY-1}" text-anchor="middle" font-size="9" fill="#333">USB${usbHost?'→PC':''}</text>`);
+  svg.push(`<text x="${xo+BWrect/2}" y="${BY-24}" text-anchor="middle" font-size="14" font-weight="bold">${title}</text>`);
+  svg.push(`<text x="${xo+BWrect/2}" y="${BY+bh+18}" text-anchor="middle" font-size="10" fill="#0a7d4f">${sub}</text>`);
+  for(let pin=1;pin<=40;pin++){
+    const p = pinPos(xo,mir,pin), u=used[pin];
+    const fill = u? u.c : (PIN[pin]==="GND"?"#8a9":"#cfd8d3");
+    svg.push(`<circle cx="${p.x}" cy="${p.y}" r="${pinR}" fill="${fill}" stroke="${u?'#000':'#789'}" stroke-width="${u?2:1}"/>`);
+    svg.push(`<text x="${p.x}" y="${p.y+3}" text-anchor="middle" font-size="7" fill="${u?'#fff':'#456'}">${pin}</text>`);
+    const nx = p.left? p.x+12 : p.x-12, anc = p.left?'start':'end';
+    svg.push(`<text x="${nx}" y="${p.y+3}" text-anchor="${anc}" font-size="8" fill="#e7f5ee">${PIN[pin]}</text>`);
   }
 }
 
-document.getElementById("boards").innerHTML =
-  board("Pico A — 探針 (Layer 1)", "debugprobe-rs · USB→PC", A_USED, true) +
-  board("Pico B — 目標 (Layer 2)", "uarthello / uartmon · SWD 被偵錯", B_USED, false);
+// 目標 Pico 底部的 3 針 SWD debug 接頭（獨立於 40-pin）
+function dbgHeader(svg, x, y){
+  svg.push(`<rect x="${x-6}" y="${y-12}" width="64" height="98" rx="6" fill="#1b1b1b" stroke="#e74c3c"/>`);
+  svg.push(`<text x="${x+26}" y="${y-2}" text-anchor="middle" font-size="8" fill="#e74c3c">SWD 接頭(板底3針)</text>`);
+  const names=["SWCLK","GND","SWDIO"], cols=[C.swd,C.gnd,C.swd], pads={};
+  names.forEach((nm,k)=>{ const px=x+6, py=y+16+k*24;
+    svg.push(`<circle cx="${px}" cy="${py}" r="6" fill="${cols[k]}"/>`);
+    svg.push(`<text x="${px+12}" y="${py+3}" text-anchor="start" font-size="8" fill="#fff">${nm}</text>`);
+    pads[nm]={x:px,y:py}; });
+  return pads;
+}
+
+// OLED 模組（4 pad）
+function oled(svg, x, y, label){
+  const w=128,h=44, names=["SDA","SCL","VCC","GND"], cols=[C.i2c,C.i2c,C.pwr,C.gnd], pads={};
+  svg.push(`<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="6" fill="#102a43" stroke="#2ecc71"/>`);
+  svg.push(`<text x="${x+w/2}" y="${y+18}" text-anchor="middle" font-size="10" fill="#7fe3a0">${label}</text>`);
+  names.forEach((nm,k)=>{ const px=x+22+k*28, py=y+h;
+    svg.push(`<circle cx="${px}" cy="${py}" r="5" fill="${cols[k]}"/>`);
+    svg.push(`<text x="${px}" y="${py+13}" text-anchor="middle" font-size="7" fill="#234">${nm}</text>`);
+    pads[nm]={x:px,y:py}; });
+  return pads;
+}
+
+// 連線（cubic bezier，水平控制點）
+function wire(svg, a, b, color, dash){
+  const mx=(a.x+b.x)/2;
+  svg.push(`<path d="M ${a.x} ${a.y} C ${mx} ${a.y}, ${mx} ${b.y}, ${b.x} ${b.y}" `
+    +`fill="none" stroke="${color}" stroke-width="2.6" opacity="0.9" `
+    +(dash?'stroke-dasharray="6 4" ':'')+`/>`);
+}
+
+// debug 接頭與 OLED pad 的座標（與繪製函式一致，供連線先行計算；須在 build() 之前定義）
+const DBGX = xoB-90, DBGY = BY+200;
+function dbgHeaderPads(){ return {SWCLK:{x:DBGX+6,y:DBGY+16}, GND:{x:DBGX+6,y:DBGY+40}, SWDIO:{x:DBGX+6,y:DBGY+64}}; }
+function oledPads(x,y){ const h=44; return {
+  SDA:{x:x+22,y:y+h}, SCL:{x:x+50,y:y+h}, VCC:{x:x+78,y:y+h}, GND:{x:x+106,y:y+h} }; }
+
+(function build(){
+  const W=980, H=700, svg=[];
+  svg.push(`<svg width="100%" viewBox="0 0 ${W} ${H}" font-family="monospace" style="max-width:980px">`);
+  // 順序：先板/模組（底層）→ 連線最後畫（疊在最上層，不被板遮住）
+  const Apin = p => pinPos(xoA,MIR_A,p);
+  const Bpin = p => pinPos(xoB,MIR_B,p);
+  const dbg  = dbgHeaderPads();        // 先算 pad 座標
+  const oA   = {x:xoA-2, y:24};
+  const oB   = {x:xoB+BWrect-126, y:24};
+  const oApads = oledPads(oA.x,oA.y), oBpads = oledPads(oB.x,oB.y);
+
+  const wires=[];
+  // === A → B SWD（紅）+ GND ===
+  wires.push([Apin(4), dbg.SWCLK, C.swd,0]);   // SWCLK
+  wires.push([Apin(5), dbg.SWDIO, C.swd,0]);   // SWDIO
+  wires.push([Apin(3), dbg.GND,   C.gnd,0]);   // GND（共地）
+  // === Reset（選，紅虛線）===
+  wires.push([Apin(2), Bpin(30),  C.swd,1]);   // A.GP1 → B.RUN
+  // === UART 橋接（藍）===
+  wires.push([Apin(6), Bpin(2),   C.uart,0]);  // A.GP4 TX → B.GP1 RX
+  wires.push([Apin(7), Bpin(1),   C.uart,0]);  // A.GP5 RX ← B.GP0 TX
+  // === OLED-A（綠/橘/灰）===
+  wires.push([oApads.SDA, Apin(9),  C.i2c,0]);
+  wires.push([oApads.SCL, Apin(10), C.i2c,0]);
+  wires.push([oApads.VCC, Apin(36), C.pwr,0]);
+  wires.push([oApads.GND, Apin(38), C.gnd,0]);
+  // === OLED-B ===
+  wires.push([oBpads.SDA, Bpin(9),  C.i2c,0]);
+  wires.push([oBpads.SCL, Bpin(10), C.i2c,0]);
+  wires.push([oBpads.VCC, Bpin(36), C.pwr,0]);
+  wires.push([oBpads.GND, Bpin(38), C.gnd,0]);
+
+  // 先畫板與模組（底層）
+  drawBoard(svg, xoA, MIR_A, "Pico A — 探針 (Layer 1)", "debugprobe-rs · USB→PC · OLED", A_USED, true);
+  drawBoard(svg, xoB, MIR_B, "Pico B — 目標 (Layer 2, RP2040)", "經 SWD 被燒錄/偵錯", B_USED, false);
+  dbgHeader(svg, DBGX, DBGY);
+  oled(svg, oA.x, oA.y, "OLED-A (SSD1306)");
+  oled(svg, oB.x, oB.y, "OLED-B (選配)");
+  // 再畫所有連線（最上層，不被板遮住）；端點加小圓點標示接腳
+  wires.forEach(([a,b,c,d])=>wire(svg,a,b,c,d));
+  wires.forEach(([a,b,c])=>{
+    svg.push(`<circle cx="${a.x}" cy="${a.y}" r="3" fill="${c}"/>`);
+    svg.push(`<circle cx="${b.x}" cy="${b.y}" r="3" fill="${c}"/>`);
+  });
+  svg.push(`</svg>`);
+  document.getElementById("boards").innerHTML = svg.join("");
+})();
 
 // 連線對照表
 const CONN = [
