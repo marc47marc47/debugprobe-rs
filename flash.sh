@@ -69,11 +69,11 @@ flash_rp2040_target() {
   echo ">> build $bin (rp2040 目標 bin)"
   cargo build --release --no-default-features --features rp2040 --bin "$bin"
   local elf="target/thumbv6m-none-eabi/release/$bin"
-  # CONNECT_RESET=1 → 加 --connect-under-reset：拉住目標 RUN 復位再連線，
-  # 讓「正在跑韌體」的 RP2040 不必 BOOTSEL 也能燒（需接 探針 GP1 → 目標 RUN/pin30）。
-  local cur="${CONNECT_RESET:+--connect-under-reset}"
-  echo ">> probe-rs download → RP2040 (probe $PROBE, ${SWD_SPEED}kHz${CONNECT_RESET:+, connect-under-reset})"
-  probe-rs download --chip RP2040 --probe "$PROBE" --protocol swd --speed "$SWD_SPEED" $cur "$elf"
+  # 直接 download：probe-rs 對 running 的 RP2040 會用 multidrop halt + 燒，免 BOOTSEL。
+  # （勿用 --connect-under-reset：實測它會把目標 RUN 按在 reset、連線失敗時不放開 → 目標卡死
+  #   要 power-cycle 才復原；plain download 本來就燒得進。）
+  echo ">> probe-rs download → RP2040 (probe $PROBE, ${SWD_SPEED}kHz)"
+  probe-rs download --chip RP2040 --probe "$PROBE" --protocol swd --speed "$SWD_SPEED" "$elf"
   probe-rs reset --chip RP2040 --probe "$PROBE" --protocol swd --speed "$SWD_SPEED"
 }
 
