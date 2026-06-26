@@ -98,8 +98,12 @@ pub(crate) async fn idle_scan(
         // count_signal 的 ce 仍供 classify 當「探針 SWCLK 驅動死」輔助；其餘統計不再顯示。
         ce = logic::count_signal(&buf).clk_edges;
         WAVE.push(&buf);
-        // 晶片偵測只在尚未鎖定時做一次（F2 功能保留）。
-        if !TARGET.valid()
+        // 晶片偵測：未鎖定就偵測；已鎖但「不完整」(core 未知，或支援 RDP 的家族卻還是 RDP?)時，
+        // 定期重驗以升級成正確值（marginal AP 第一次可能讀壞、鎖到不完整；之後乾淨讀補上）。
+        let incomplete = TARGET.valid()
+            && (TARGET.core() == 0
+                || (TARGET.rdp() == dap::RdpLevel::Unknown && dap::rdp_supported(TARGET.devid())));
+        if (!TARGET.valid() || incomplete)
             && let Some(info) = dap.detect_target().await
         {
             TARGET.store(&info);

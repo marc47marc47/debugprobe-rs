@@ -36,12 +36,32 @@ impl<'d> Dap<'d> {
         false
     }
 
-    /// 讀 CPUID 的 PARTNO(bits[15:4])（A：通用 Cortex-M 核心辨識）；失敗回 0。
+    /// 讀 CPUID 的 PARTNO(bits[15:4])（A：通用 Cortex-M 核心辨識）；失敗/讀不穩回 0。
     async fn read_cpuid_part(&mut self) -> u16 {
-        match self.read_mem32(reg::CPUID).await {
+        // CPUID 不可能為 0 → allow_zero=false（0 視為壞讀）。
+        match self.read_mem32_stable(reg::CPUID, false).await {
             Some(v) => ((v >> 4) & 0xFFF) as u16,
             None => 0,
         }
+    }
+
+    /// 對 marginal AP：同址重讀，需「連續兩次一致」才採信，抗偶發位元錯(如 CPUID 0xC23→0xC24
+    /// 把 M3 誤判成 M4)與讀 0。`allow_zero=false` 時把 0 也當壞讀(CPUID/DBGMCU 永不為 0);
+    /// PIDR/option 暫存器合法可為 0 故 allow_zero=true。全 1(0xFFFFFFFF)一律視為壞讀。最多 5 次。
+    async fn read_mem32_stable(&mut self, addr: u32, allow_zero: bool) -> Option<u32> {
+        let mut prev: Option<u32> = None;
+        for _ in 0..5 {
+            if let Some(v) = self.read_mem32(addr).await {
+                if v == 0xFFFF_FFFF || (!allow_zero && v == 0) {
+                    continue; // 壞讀，重置不算數
+                }
+                if prev == Some(v) {
+                    return Some(v); // 連續兩次一致 → 採信
+                }
+                prev = Some(v);
+            }
+        }
+        None
     }
 
     /// 經 AHB-AP 讀一個 32-bit 記憶體字（posted read + RDBUFF）。全程 WAIT 重試。
@@ -85,8 +105,8 @@ impl<'d> Dap<'d> {
         let mut rdp = RdpLevel::Unknown;
 
         if designer == JEP_ST || designer == 0 {
-            // ST / GD32：DBGMCU_IDCODE，DEV_ID = bits[11:0]，再讀 RDP。
-            if let Some(v) = self.read_mem32(reg::DBGMCU_IDCODE).await {
+            // ST / GD32：DBGMCU_IDCODE，DEV_ID = bits[11:0]（一致性讀），再讀 RDP。
+            if let Some(v) = self.read_mem32_stable(reg::DBGMCU_IDCODE, false).await {
                 let d = (v & 0xFFF) as u16;
                 if d != 0 && d != 0xFFF {
                     devid = d;
@@ -95,10 +115,16 @@ impl<'d> Dap<'d> {
             }
         } else if designer == JEP_NORDIC {
             // Nordic：FICR.INFO.PART（如 0x52832）。
-            part = self.read_mem32(reg::NORDIC_FICR_PART).await.unwrap_or(0);
+            part = self.read_mem32_stable(reg::NORDIC_FICR_PART, false).await.unwrap_or(0);
         }
 
-        // 已通過 DPIDR+powerup，目標確實存在；即使廠商/型號未知也回報（OLED 至少顯示核心）。
+        // 全垃圾守門：devid/part/core 全 0（marginal AP 讀壞/讀 0）→ 回 None，別鎖「vendor 0x000」之類。
+        // idle_scan 會下一輪重試，直到一次乾淨讀。core 由一致性讀取得，已抗單 bit 錯(M3→M4)。
+        if devid == 0 && part == 0 && core == 0 {
+            return None;
+        }
+
+        // 通過守門：至少有一項可信。即使部分未知也回報（OLED 顯示晶片名或核心；缺的由再驗升級）。
         Some(TargetInfo {
             designer,
             devid,
@@ -168,9 +194,10 @@ impl<'d> Dap<'d> {
 
     /// 讀 CoreSight ROM table(0xE00FF000) 的 PIDR，取 JEP106 廠商碼（cc<<7|id）；失敗回 0。
     async fn read_designer(&mut self) -> u16 {
-        let p1 = self.read_mem32(reg::ROM_PIDR1).await;
-        let p2 = self.read_mem32(reg::ROM_PIDR2).await;
-        let p4 = self.read_mem32(reg::ROM_PIDR4).await;
+        // PIDR4 對 ST 合法為 0（JEP106 continuation=0）→ allow_zero=true。
+        let p1 = self.read_mem32_stable(reg::ROM_PIDR1, true).await;
+        let p2 = self.read_mem32_stable(reg::ROM_PIDR2, true).await;
+        let p4 = self.read_mem32_stable(reg::ROM_PIDR4, true).await;
         match (p1, p2, p4) {
             (Some(p1), Some(p2), Some(p4)) => {
                 let id = ((p2 & 0x7) << 4) | ((p1 >> 4) & 0xF); // 7-bit JEP106 id
@@ -190,16 +217,16 @@ impl<'d> Dap<'d> {
             _ => RdpLevel::Level1,
         };
         match rdp_reg(devid) {
-            RdpReg::Optcr => match self.read_mem32(reg::FLASH_OPTCR).await {
+            RdpReg::Optcr => match self.read_mem32_stable(reg::FLASH_OPTCR, true).await {
                 Some(v) => rdp_byte(((v >> 8) & 0xFF) as u8),
                 None => RdpLevel::Unknown,
             },
-            RdpReg::Obr => match self.read_mem32(reg::FLASH_OBR).await {
+            RdpReg::Obr => match self.read_mem32_stable(reg::FLASH_OBR, true).await {
                 Some(v) if v & 0x2 != 0 => RdpLevel::Level1,
                 Some(_) => RdpLevel::Open,
                 None => RdpLevel::Unknown,
             },
-            RdpReg::Optr => match self.read_mem32(reg::FLASH_OPTR).await {
+            RdpReg::Optr => match self.read_mem32_stable(reg::FLASH_OPTR, true).await {
                 Some(v) => rdp_byte((v & 0xFF) as u8),
                 None => RdpLevel::Unknown,
             },
